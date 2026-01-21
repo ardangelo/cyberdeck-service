@@ -1,0 +1,6 @@
+cyberdeck_daemon
+fake_uart
+fake_uinput
+
+**/*.o
+
