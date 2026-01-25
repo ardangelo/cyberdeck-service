@@ -6,12 +6,10 @@
 #define MAGIC1 0x5A
 #define PROTO_VERSION 1
 
-#define MSG_KEY_EVENT 0x01
-#define MSG_STARTUP 0x02
-#define MSG_BULK_AVAILABLE 0x10
-#define MSG_BULK_START 0x11
-#define MSG_BULK_DONE 0x12
-#define MSG_BULK_REQUEST_TX 0x13
+#define MSG_STARTUP 0x01
+#define MSG_STARTUP_ACK 0x03
+#define MSG_SHUTDOWN 0x03
+#define MSG_KEY_EVENT 0x10
 
 //! Formatted key event
 #define FORMATTED_KEY_BB_CALL 0x02
