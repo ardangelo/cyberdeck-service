@@ -7,7 +7,7 @@
 #define PROTO_VERSION 1
 
 #define MSG_STARTUP 0x01
-#define MSG_STARTUP_ACK 0x03
+#define MSG_STARTUP_ACK 0x02
 #define MSG_SHUTDOWN 0x03
 #define MSG_KEY_EVENT 0x10
 
