@@ -68,6 +68,7 @@ static Opts parse_argv(int argc, char** argv) {
 
     if ((!opts.uart_path) || (!opts.uinput_path)) {
         print_usage(argv[0]);
+        throw UartError("missing required arguments");
     }
 
     return opts;

@@ -8,13 +8,52 @@ extern "C" {
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <getopt.h>
 #include <poll.h>
 #include <signal.h>
-#include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
+
+struct Opts {
+    int heartbeat_ms = 3000;
+};
+
+static void print_usage(const char* argv0) {
+    fprintf(stderr, "Usage: %s [--heartbeat=<ms>] [--help]\n", argv0);
+}
+
+static Opts parse_argv(int argc, char** argv) {
+    Opts opts;
+
+    static struct option long_options[] = {
+        {"heartbeat", required_argument, nullptr, 'b'},
+        {"help",      no_argument,       nullptr, 'h'},
+        {nullptr,     0,                 nullptr, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "b:h", long_options, nullptr)) != -1) {
+        switch (opt) {
+            case 'b':
+                opts.heartbeat_ms = atoi(optarg);
+                if (opts.heartbeat_ms <= 0) {
+                    opts.heartbeat_ms = 3000;
+                }
+                break;
+            case 'h':
+                print_usage(argv[0]);
+                exit(0);
+            default:
+                print_usage(argv[0]);
+                throw UartError("invalid arguments");
+        }
+    }
+
+    return opts;
+}
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -169,8 +208,10 @@ static void send_touchpad(Uart& uart, int32_t dx, int32_t dy) {
     uart.send(msg);
 }
 
-int main(int, char**) {
+int main(int argc, char** argv) {
     install_terminate_handler();
+
+    Opts opts = parse_argv(argc, argv);
 
     struct sigaction sa{};
     sa.sa_handler = signal_handler;
@@ -186,13 +227,14 @@ int main(int, char**) {
     fflush(stdout);
 
     fprintf(stderr, "[fake_uart] PTY created: %s\n", pty.slave_path);
+    fprintf(stderr, "[fake_uart] Heartbeat interval: %d ms\n", opts.heartbeat_ms);
     fprintf(stderr, "[fake_uart] Waiting for daemon to connect...\n");
 
     StdinNonCanonGuard stdin_guard;
 
     bool connected = false;
-    auto last_heartbeat = std::chrono::steady_clock::now() - std::chrono::seconds(3);
-    constexpr auto heartbeat_interval = std::chrono::milliseconds(3000);
+    auto heartbeat_interval = std::chrono::milliseconds(opts.heartbeat_ms);
+    auto last_heartbeat = std::chrono::steady_clock::now() - heartbeat_interval;
 
     enum class EscState { None, Esc, Bracket };
     EscState esc_state = EscState::None;

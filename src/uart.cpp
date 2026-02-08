@@ -118,9 +118,12 @@ static void encode_and_send(Uart& uart, const MsgType& msg,
     uint8_t cobs_buffer[MAX_SIZE_AFTER_COBS_ENCODING(128)];
     size_t cobs_len = cobs_encode(cobs_buffer, pb_buffer, payload_len);
 
+    // Write delimiter + COBS data + trailing delimiter
+    // Trailing delimiter ensures receiver can complete the frame immediately
     uint8_t delim = 0x00;
     uart.send_raw(&delim, 1);
     uart.send_raw(cobs_buffer, cobs_len);
+    uart.send_raw(&delim, 1);
 }
 
 void Uart::send(const k230_K230ToNrf& msg) {
