@@ -1,7 +1,7 @@
 CXX ?= g++
 CC  ?= gcc
 
-CXXFLAGS ?= -O2 -g -Wall -Wextra -std=c++17 -fno-rtti
+CXXFLAGS ?= -O2 -g -Wall -Wextra -std=c++20 -fno-rtti
 CFLAGS   ?= -O2 -g -Wall -Wextra
 CPPFLAGS := -Isrc/nanopb -Isrc
 LDFLAGS  ?=
@@ -25,10 +25,10 @@ all: cyberdeck_daemon fake_uart fake_uinput
 proto:
 	python3 src/nanopb/generator/nanopb_generator.py -I src/pebble -D src/pebble src/pebble/k230_protocol.proto
 
-cyberdeck_daemon: src/main.o $(PROTO_OBJS)
+cyberdeck_daemon: src/main.o src/uart.o $(PROTO_OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-fake_uart: src/fake_uart.o $(PROTO_OBJS)
+fake_uart: src/fake_uart.o src/uart.o $(PROTO_OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 fake_uinput: src/fake_uinput.cpp
