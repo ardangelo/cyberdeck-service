@@ -1,25 +1,50 @@
 CXX ?= g++
+CC  ?= gcc
 
 CXXFLAGS ?= -O2 -g -Wall -Wextra -std=c++17 -fno-rtti
-CPPFLAGS ?=
+CFLAGS   ?= -O2 -g -Wall -Wextra
+CPPFLAGS := -Isrc/nanopb -Isrc
 LDFLAGS  ?=
 LDLIBS   ?=
 
-.PHONY: all clean
+# nanopb sources
+NANOPB_SRCS = src/nanopb/pb_encode.c src/nanopb/pb_decode.c src/nanopb/pb_common.c
+NANOPB_OBJS = $(NANOPB_SRCS:.c=.o)
+
+# pebble protocol sources
+PEBBLE_SRCS = src/pebble/cobs.c src/pebble/crc8.c src/pebble/k230_protocol.pb.c
+PEBBLE_OBJS = $(PEBBLE_SRCS:.c=.o)
+
+PROTO_OBJS = $(NANOPB_OBJS) $(PEBBLE_OBJS)
+
+.PHONY: all clean proto
 
 all: cyberdeck_daemon fake_uart fake_uinput
 
-cyberdeck_daemon: src/main.o src/uart.cpp src/uinput.cpp
+# Generate nanopb files from proto
+proto:
+	python3 src/nanopb/generator/nanopb_generator.py -I src/pebble -D src/pebble src/pebble/k230_protocol.proto
+
+cyberdeck_daemon: src/main.o $(PROTO_OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-fake_uart: src/fake_uart.cpp
+fake_uart: src/fake_uart.o $(PROTO_OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 fake_uinput: src/fake_uinput.cpp
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-%.o: %.cpp
+# Compile C++ sources
+src/%.o: src/%.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
 
+# Compile C sources in pebble/
+src/pebble/%.o: src/pebble/%.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+# Compile nanopb C sources
+src/nanopb/%.o: src/nanopb/%.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
 clean:
-	rm -f cyberdeck_daemon fake_uart fake_uinput src/*.o
+	rm -f cyberdeck_daemon fake_uart fake_uinput src/*.o src/pebble/*.o src/nanopb/*.o

@@ -1,0 +1,43 @@
+// SPDX-FileCopyrightText: 2024 Google LLC
+// SPDX-License-Identifier: Apache-2.0
+
+// K230 <-> nRF Communication Protocol
+
+syntax = "proto2";
+package k230;
+
+// nRF → K230 messages
+message NrfToK230 {
+  oneof msg {
+    RawKeyboardEvent keyboard = 1;
+    RawTouchpadEvent touchpad = 2;
+    Heartbeat heartbeat = 10;
+  }
+}
+
+// K230 → nRF messages
+message K230ToNrf {
+  oneof msg {
+    Shutdown shutdown = 1;
+    Ack ack = 10;
+  }
+}
+
+message RawKeyboardEvent {
+  required uint32 keycode = 1;
+  required bool is_down = 2;
+}
+
+message RawTouchpadEvent {
+  required int32 delta_x = 1;
+  required int32 delta_y = 2;
+  required uint32 surface_qual = 3;
+}
+
+message Heartbeat {}
+
+message Shutdown {}
+
+message Ack {
+  required uint32 sequence = 1;
+}

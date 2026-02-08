@@ -2,9 +2,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <string>
-#include <vector>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -12,13 +13,29 @@
 #include <signal.h>
 #include <poll.h>
 
-#include <msgpack.hpp>
+// C++ compatibility for C headers using 'restrict'
+#define restrict __restrict__
 
-#include "event.hpp"
+extern "C" {
+#include "nanopb/pb_encode.h"
+#include "nanopb/pb_decode.h"
+#include "pebble/console/cobs.h"
+#include "pebble/util/crc8.h"
+#include "pebble/k230_protocol.pb.h"
+}
+
+// Protocol constants
+static constexpr size_t RX_BUFFER_SIZE = 128;
+static constexpr uint8_t FRAME_DELIMITER = 0x00;
 
 static volatile sig_atomic_t g_stop = 0;
 
 static void on_sigint(int) { g_stop = 1; }
+
+[[noreturn]] static void die_perror(const char* what) {
+    perror(what);
+    std::exit(1);
+}
 
 static void write_all(int fd, const uint8_t* buf, size_t len) {
     size_t off = 0;
@@ -26,383 +43,321 @@ static void write_all(int fd, const uint8_t* buf, size_t len) {
         ssize_t n = write(fd, buf + off, len - off);
         if (n < 0) {
             if (errno == EINTR) continue;
-            perror("write");
-            exit(1);
+            die_perror("write");
         }
         off += static_cast<size_t>(n);
     }
 }
 
-static bool read_full(int fd, void* buf, size_t len) {
-    uint8_t* p = reinterpret_cast<uint8_t*>(buf);
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = read(fd, p + off, len - off);
-        if (n == 0) return false; // EOF
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return false;
+// ─────────────────────────────────────────────────────────────────────────────
+// Frame Transmitter (nRF → K230)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class FrameTransmitter {
+public:
+    explicit FrameTransmitter(int fd) : fd_(fd) {}
+
+    void send(const k230_NrfToK230& msg) {
+        // Encode protobuf
+        uint8_t pb_buffer[k230_NrfToK230_size];
+        pb_ostream_t stream = pb_ostream_from_buffer(pb_buffer, sizeof(pb_buffer));
+        if (!pb_encode(&stream, k230_NrfToK230_fields, &msg)) {
+            std::fprintf(stderr, "WARN: pb_encode failed\n");
+            return;
         }
-        off += static_cast<size_t>(n);
+        size_t pb_len = stream.bytes_written;
+
+        // Append CRC8
+        uint8_t with_crc[k230_NrfToK230_size + 1];
+        std::memcpy(with_crc, pb_buffer, pb_len);
+        with_crc[pb_len] = crc8_calculate_bytes(pb_buffer, pb_len, false);
+
+        // COBS encode
+        uint8_t cobs_buffer[MAX_SIZE_AFTER_COBS_ENCODING(k230_NrfToK230_size + 1)];
+        size_t cobs_len = cobs_encode(cobs_buffer, with_crc, pb_len + 1);
+
+        // Send delimiter + frame
+        uint8_t delimiter = FRAME_DELIMITER;
+        write_all(fd_, &delimiter, 1);
+        write_all(fd_, cobs_buffer, cobs_len);
     }
-    return true;
-}
 
-static uint32_t read_u32_le(const uint8_t* p) {
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
-}
+    void send_heartbeat() {
+        k230_NrfToK230 msg = k230_NrfToK230_init_zero;
+        msg.which_msg = k230_NrfToK230_heartbeat_tag;
+        send(msg);
+    }
 
-static std::vector<uint8_t> pack_frame(uint8_t msg_type, const msgpack::sbuffer& sbuf) {
-    uint32_t payload_len = static_cast<uint32_t>(sbuf.size());
+    void send_keyboard(uint32_t keycode, bool is_down) {
+        k230_NrfToK230 msg = k230_NrfToK230_init_zero;
+        msg.which_msg = k230_NrfToK230_keyboard_tag;
+        msg.msg.keyboard.keycode = keycode;
+        msg.msg.keyboard.is_down = is_down;
+        send(msg);
+    }
 
-    std::vector<uint8_t> frame;
-    frame.reserve(2 + 1 + 1 + 4 + payload_len + 4);
+    void send_touchpad(int32_t dx, int32_t dy, uint32_t surface_qual = 100) {
+        k230_NrfToK230 msg = k230_NrfToK230_init_zero;
+        msg.which_msg = k230_NrfToK230_touchpad_tag;
+        msg.msg.touchpad.delta_x = dx;
+        msg.msg.touchpad.delta_y = dy;
+        msg.msg.touchpad.surface_qual = surface_qual;
+        send(msg);
+    }
 
-    frame.push_back(MAGIC0);
-    frame.push_back(MAGIC1);
-    frame.push_back(PROTO_VERSION);
-    frame.push_back(msg_type);
-
-    append_u32_le(frame, payload_len);
-    frame.insert(frame.end(),
-                 reinterpret_cast<const uint8_t*>(sbuf.data()),
-                 reinterpret_cast<const uint8_t*>(sbuf.data()) + sbuf.size());
-
-    uint32_t crc = crc32_ieee(frame.data(), frame.size());
-    append_u32_le(frame, crc);
-
-    return frame;
-}
-
-static std::vector<uint8_t> pack_raw_key_event_frame(const RawKeyboardEvent& ev) {
-    msgpack::sbuffer sbuf;
-    msgpack::packer<msgpack::sbuffer> pk(sbuf);
-
-    pk.pack_map(1);
-    pk.pack_int(2);
-    pk.pack_bin(sizeof(RawKeyboardEvent));
-    pk.pack_bin_body(reinterpret_cast<const char*>(&ev), sizeof(RawKeyboardEvent));
-
-    return pack_frame(MSG_KEY_EVENT, sbuf);
-}
-
-static std::vector<uint8_t> pack_startup_ack_frame(uint32_t session_id) {
-    msgpack::sbuffer sbuf;
-    msgpack::packer<msgpack::sbuffer> pk(sbuf);
-
-    // ACK payload: { 1: session_id }
-    pk.pack_map(1);
-    pk.pack_int(1);
-    pk.pack_uint32(session_id);
-
-    return pack_frame(MSG_STARTUP_ACK, sbuf);
-}
-
-static void send_raw_key(int out_fd, uint8_t c, bool is_down) {
-    RawKeyboardEvent ev{};
-    ev.c = c;
-    ev.is_down = is_down;
-
-    auto frame = pack_raw_key_event_frame(ev);
-    write_all(out_fd, frame.data(), frame.size());
-}
-
-static void send_startup_ack(int out_fd, uint32_t session_id) {
-    auto frame = pack_startup_ack_frame(session_id);
-    write_all(out_fd, frame.data(), frame.size());
-}
-
-struct RxFrame {
-    uint8_t msg_type{};
-    std::vector<uint8_t> payload; // msgpack bytes
+private:
+    int fd_;
 };
 
-static bool find_magic(int fd) {
-    uint8_t b = 0;
-    for (;;) {
-        ssize_t n = read(fd, &b, 1);
-        if (n == 0) return false;
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        if (b != MAGIC0) continue;
+// ─────────────────────────────────────────────────────────────────────────────
+// Frame Receiver (K230 → nRF)
+// ─────────────────────────────────────────────────────────────────────────────
 
-        uint8_t b2 = 0;
-        if (!read_full(fd, &b2, 1)) return false;
-        if (b2 == MAGIC1) return true;
-        // otherwise keep scanning
-    }
-}
+class FrameReceiver {
+public:
+    explicit FrameReceiver(int fd) : fd_(fd) {}
 
-static bool read_frame_from_uart(int fd, RxFrame& out) {
-    if (!find_magic(fd)) return false;
+    // Non-blocking receive attempt
+    bool try_receive(k230_K230ToNrf& out_msg) {
+        uint8_t byte;
+        while (true) {
+            ssize_t n = read(fd_, &byte, 1);
+            if (n == 0) return false;
+            if (n < 0) {
+                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                    return false;
+                }
+                return false;
+            }
 
-    uint8_t hdr[6]; // version, msg_type, payload_len(u32)
-    if (!read_full(fd, hdr, sizeof(hdr))) return false;
-
-    const uint8_t version = hdr[0];
-    const uint8_t msg_type = hdr[1];
-    const uint32_t payload_len = read_u32_le(hdr + 2);
-
-    std::vector<uint8_t> payload(payload_len);
-    if (payload_len && !read_full(fd, payload.data(), payload.size())) return false;
-
-    uint8_t crc_bytes[4];
-    if (!read_full(fd, crc_bytes, sizeof(crc_bytes))) return false;
-
-    // Verify CRC over magic+hdr+payload
-    std::vector<uint8_t> crc_buf;
-    crc_buf.reserve(2 + sizeof(hdr) + payload.size());
-    crc_buf.push_back(MAGIC0);
-    crc_buf.push_back(MAGIC1);
-    crc_buf.insert(crc_buf.end(), hdr, hdr + sizeof(hdr));
-    crc_buf.insert(crc_buf.end(), payload.begin(), payload.end());
-
-    const uint32_t got_crc = read_u32_le(crc_bytes);
-    const uint32_t calc_crc = crc32_ieee(crc_buf.data(), crc_buf.size());
-
-    if (version != PROTO_VERSION) {
-        fprintf(stderr, "WARN: version mismatch (got %u, want %u)\n",
-                (unsigned)version, (unsigned)PROTO_VERSION);
-        return false;
-    }
-    if (got_crc != calc_crc) {
-        fprintf(stderr, "WARN: CRC mismatch (calc=0x%08x got=0x%08x)\n", calc_crc, got_crc);
-        return false;
-    }
-
-    out.msg_type = msg_type;
-    out.payload = std::move(payload);
-    return true;
-}
-
-static bool parse_session_id_key1(const std::vector<uint8_t>& payload, uint32_t& session_id_out) {
-    msgpack::object_handle oh;
-    try {
-        oh = msgpack::unpack(reinterpret_cast<const char*>(payload.data()), payload.size());
-    } catch (...) {
-        return false;
-    }
-
-    msgpack::object obj = oh.get();
-    if (obj.type != msgpack::type::MAP) return false;
-
-    for (uint32_t i = 0; i < obj.via.map.size; i++) {
-        const auto& kv = obj.via.map.ptr[i];
-
-        int64_t k = 0;
-        if (kv.key.type == msgpack::type::POSITIVE_INTEGER) k = (int64_t)kv.key.via.u64;
-        else if (kv.key.type == msgpack::type::NEGATIVE_INTEGER) k = (int64_t)kv.key.via.i64;
-        else continue;
-
-        if (k == 1 && kv.val.type == msgpack::type::POSITIVE_INTEGER) {
-            session_id_out = (uint32_t)kv.val.via.u64;
-            return true;
+            if (byte == FRAME_DELIMITER) {
+                if (frame_in_progress_) {
+                    size_t len = cobs_streaming_decode_finish(&cobs_ctx_);
+                    if (len != SIZE_MAX && len >= 2) {
+                        uint8_t rx_crc = rx_buffer_[len - 1];
+                        uint8_t calc_crc = crc8_calculate_bytes(rx_buffer_, len - 1, false);
+                        if (rx_crc == calc_crc) {
+                            pb_istream_t stream = pb_istream_from_buffer(rx_buffer_, len - 1);
+                            out_msg = k230_K230ToNrf_init_zero;
+                            if (pb_decode(&stream, k230_K230ToNrf_fields, &out_msg)) {
+                                frame_in_progress_ = false;
+                                return true;
+                            }
+                        }
+                    }
+                }
+                cobs_streaming_decode_start(&cobs_ctx_, rx_buffer_, sizeof(rx_buffer_));
+                frame_in_progress_ = true;
+            } else if (frame_in_progress_) {
+                if (!cobs_streaming_decode(&cobs_ctx_, static_cast<char>(byte))) {
+                    frame_in_progress_ = false;
+                }
+            }
         }
     }
-    return false;
-}
+
+private:
+    int fd_;
+    uint8_t rx_buffer_[RX_BUFFER_SIZE]{};
+    CobsDecodeContext cobs_ctx_{};
+    bool frame_in_progress_ = false;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PTY Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 struct Pty {
-    int master_fd{-1};
-    int slave_fd{-1};
+    int master_fd = -1;
+    int slave_fd = -1;
     std::string slave_path;
 };
 
-static void set_raw_mode_fd(int fd) {
+static void set_raw_mode(int fd) {
     termios tio{};
-    if (tcgetattr(fd, &tio) != 0) {
-        perror("tcgetattr");
-        exit(1);
-    }
+    if (tcgetattr(fd, &tio) != 0) die_perror("tcgetattr");
     cfmakeraw(&tio);
-
-    // 8N1, no flow control
     tio.c_cflag |= (CLOCAL | CREAD);
     tio.c_cflag &= ~CRTSCTS;
     tio.c_cflag &= ~PARENB;
     tio.c_cflag &= ~CSTOPB;
     tio.c_cflag &= ~CSIZE;
     tio.c_cflag |= CS8;
-
-    if (tcsetattr(fd, TCSANOW, &tio) != 0) {
-        perror("tcsetattr");
-        exit(1);
-    }
+    if (tcsetattr(fd, TCSANOW, &tio) != 0) die_perror("tcsetattr");
 }
 
 static Pty create_pty() {
-    Pty p{};
-
+    Pty p;
     p.master_fd = posix_openpt(O_RDWR | O_NOCTTY);
-    if (p.master_fd < 0) {
-        perror("posix_openpt");
-        exit(1);
-    }
-    if (grantpt(p.master_fd) != 0) {
-        perror("grantpt");
-        exit(1);
-    }
-    if (unlockpt(p.master_fd) != 0) {
-        perror("unlockpt");
-        exit(1);
-    }
+    if (p.master_fd < 0) die_perror("posix_openpt");
+    if (grantpt(p.master_fd) != 0) die_perror("grantpt");
+    if (unlockpt(p.master_fd) != 0) die_perror("unlockpt");
 
     char* name = ptsname(p.master_fd);
-    if (!name) {
-        perror("ptsname");
-        exit(1);
-    }
+    if (!name) die_perror("ptsname");
     p.slave_path = name;
 
     p.slave_fd = open(p.slave_path.c_str(), O_RDWR | O_NOCTTY);
-    if (p.slave_fd < 0) {
-        perror("open slave");
-        exit(1);
-    }
+    if (p.slave_fd < 0) die_perror("open slave");
 
-    set_raw_mode_fd(p.master_fd);
-    set_raw_mode_fd(p.slave_fd);
-
+    set_raw_mode(p.master_fd);
+    set_raw_mode(p.slave_fd);
     return p;
 }
 
-struct StdinNonCanonGuard {
-    bool active{false};
-    termios saved{};
+// ─────────────────────────────────────────────────────────────────────────────
+// Stdin Non-Canonical Mode RAII
+// ─────────────────────────────────────────────────────────────────────────────
 
+class StdinNonCanonGuard {
+public:
     StdinNonCanonGuard() {
         if (!isatty(STDIN_FILENO)) return;
-        if (tcgetattr(STDIN_FILENO, &saved) != 0) return;
+        if (tcgetattr(STDIN_FILENO, &saved_) != 0) return;
 
-        termios t = saved;
-
-        // Disable canonical line mode.
-        t.c_lflag &= (tcflag_t)~ICANON;
-
-        // Keep Ctrl-C and echo.
+        termios t = saved_;
+        t.c_lflag &= static_cast<tcflag_t>(~ICANON);
         t.c_lflag |= ISIG;
         t.c_lflag |= ECHO;
-
-        // Disable software flow control.
-        t.c_iflag &= (tcflag_t)~(IXON | IXOFF);
-
-        // Byte-at-a-time reads.
+        t.c_iflag &= static_cast<tcflag_t>(~(IXON | IXOFF));
         t.c_cc[VMIN] = 1;
         t.c_cc[VTIME] = 0;
 
-        if (tcsetattr(STDIN_FILENO, TCSANOW, &t) == 0) active = true;
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &t) == 0) {
+            active_ = true;
+        }
 
-        // Fix stdout newline rendering: \n -> \r\n
+        // Fix newline rendering
         if (isatty(STDOUT_FILENO)) {
             termios o{};
             if (tcgetattr(STDOUT_FILENO, &o) == 0) {
-                o.c_oflag |= OPOST;
-                o.c_oflag |= ONLCR;
-                (void)tcsetattr(STDOUT_FILENO, TCSANOW, &o);
+                o.c_oflag |= OPOST | ONLCR;
+                tcsetattr(STDOUT_FILENO, TCSANOW, &o);
             }
         }
     }
 
     ~StdinNonCanonGuard() {
-        if (active) tcsetattr(STDIN_FILENO, TCSANOW, &saved);
+        if (active_) {
+            tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
+        }
     }
+
+private:
+    bool active_ = false;
+    termios saved_{};
 };
 
-int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+// ─────────────────────────────────────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // Handle Ctrl-C
+int main() {
+    // Signal handling
     struct sigaction sa{};
     sa.sa_handler = on_sigint;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    if (sigaction(SIGINT, &sa, nullptr) != 0) {
-        perror("sigaction(SIGINT)");
-        return 1;
-    }
+    sigaction(SIGINT, &sa, nullptr);
 
-    Pty p = create_pty();
-
-    // Make interactive input byte-by-byte
+    Pty pty = create_pty();
     StdinNonCanonGuard stdin_guard;
 
-    // Print the slave PTY path
-    fprintf(stdout, "%s\r\n", p.slave_path.c_str());
-    fflush(stdout);
+    // Print slave PTY path for daemon to connect
+    std::printf("%s\n", pty.slave_path.c_str());
+    std::fflush(stdout);
 
-    // Main loop: poll stdin and UART master for handshake frames.
-    // - stdin bytes generate KEY_EVENT frames
-    // - MSG_STARTUP triggers MSG_STARTUP_ACK
-    // - MSG_SHUTDOWN triggers exit
+    FrameTransmitter tx(pty.master_fd);
+    FrameReceiver rx(pty.master_fd);
+
+    bool connected = false;
+    int heartbeat_counter = 0;
+    constexpr int HEARTBEAT_INTERVAL_MS = 3000;
+    constexpr int POLL_TIMEOUT_MS = 100;
+
+    std::fprintf(stderr, "INFO: Fake UART started. Type to send key events.\n");
+    std::fprintf(stderr, "INFO: Arrow keys send touchpad events. Ctrl-D to exit.\n");
+
     while (!g_stop) {
-        struct pollfd pfds[2]{};
+        pollfd pfds[2]{};
         pfds[0].fd = STDIN_FILENO;
         pfds[0].events = POLLIN;
-        pfds[1].fd = p.master_fd;
+        pfds[1].fd = pty.master_fd;
         pfds[1].events = POLLIN;
 
-        int pr = poll(pfds, 2, 100);
+        int pr = poll(pfds, 2, POLL_TIMEOUT_MS);
         if (pr < 0) {
             if (errno == EINTR) continue;
-            perror("poll");
-            return 1;
+            die_perror("poll");
         }
 
-        // Handle inbound frames from daemon (handshake/shutdown)
+        // Send periodic heartbeat
+        heartbeat_counter += POLL_TIMEOUT_MS;
+        if (!connected && heartbeat_counter >= HEARTBEAT_INTERVAL_MS) {
+            std::fprintf(stderr, "INFO: Sending heartbeat...\n");
+            tx.send_heartbeat();
+            heartbeat_counter = 0;
+        }
+
+        // Handle incoming frames from daemon
         if (pfds[1].revents & POLLIN) {
-            RxFrame fr{};
-            if (read_frame_from_uart(p.master_fd, fr)) {
-                if (fr.msg_type == MSG_STARTUP) {
-                    uint32_t sid = 0;
-                    if (parse_session_id_key1(fr.payload, sid)) {
-                        fprintf(stderr, "INFO: RX MSG_STARTUP sid=%u -> TX MSG_STARTUP_ACK\n", sid);
-                        send_startup_ack(p.master_fd, sid);
-                    } else {
-                        fprintf(stderr, "WARN: RX MSG_STARTUP but could not parse session_id\n");
+            k230_K230ToNrf msg;
+            while (rx.try_receive(msg)) {
+                if (msg.which_msg == k230_K230ToNrf_ack_tag) {
+                    if (!connected) {
+                        std::fprintf(stderr, "INFO: ACK received, connected!\n");
+                        connected = true;
                     }
-                } else if (fr.msg_type == MSG_SHUTDOWN) {
-                    uint32_t sid = 0;
-                    (void)parse_session_id_key1(fr.payload, sid);
-                    fprintf(stderr, "INFO: RX MSG_SHUTDOWN sid=%u; exiting\n", sid);
-                    break;
-                } else {
-                    // Ignore other message types in fake peer.
+                } else if (msg.which_msg == k230_K230ToNrf_shutdown_tag) {
+                    std::fprintf(stderr, "INFO: Shutdown received, exiting.\n");
+                    return 0;
                 }
             }
         }
 
-        // Handle stdin -> key events
+        // Handle stdin input
         if (pfds[0].revents & POLLIN) {
-            uint8_t b = 0;
-            ssize_t n = read(STDIN_FILENO, &b, 1);
-            if (n == 0) {
-                // stdin EOF (pipe/file)
-                break;
-            }
+            uint8_t buf[8];
+            ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+            if (n == 0) break;  // EOF
             if (n < 0) {
                 if (errno == EINTR) continue;
-                perror("read(stdin)");
-                return 1;
+                die_perror("read(stdin)");
             }
 
-            // In non-canonical mode, Ctrl-D is delivered as byte 0x04; treat as "done".
-            if (isatty(STDIN_FILENO) && b == 0x04) {
+            // Check for Ctrl-D
+            if (isatty(STDIN_FILENO) && n == 1 && buf[0] == 0x04) {
                 break;
             }
 
-            send_raw_key(p.master_fd, b, true);
-            send_raw_key(p.master_fd, b, false);
+            // Check for escape sequences (arrow keys)
+            if (n >= 3 && buf[0] == 0x1B && buf[1] == '[') {
+                int32_t dx = 0, dy = 0;
+                switch (buf[2]) {
+                    case 'A': dy = -10; break;  // Up
+                    case 'B': dy = 10; break;   // Down
+                    case 'C': dx = 10; break;   // Right
+                    case 'D': dx = -10; break;  // Left
+                }
+                if (dx != 0 || dy != 0) {
+                    std::fprintf(stderr, "TX: touchpad(%d, %d)\n", dx, dy);
+                    tx.send_touchpad(dx, dy);
+                    continue;
+                }
+            }
+
+            // Send as key events
+            for (ssize_t i = 0; i < n; ++i) {
+                uint32_t keycode = buf[i];
+                std::fprintf(stderr, "TX: key(%u down+up)\n", keycode);
+                tx.send_keyboard(keycode, true);
+                tx.send_keyboard(keycode, false);
+            }
         }
 
-        // If daemon hung up on PTY, poll may show HUP/ERR. Exit gracefully.
+        // Check for PTY hangup
         if (pfds[1].revents & (POLLHUP | POLLERR | POLLNVAL)) {
-            fprintf(stderr, "INFO: UART master revents=0x%x; exiting\n", pfds[1].revents);
+            std::fprintf(stderr, "INFO: PTY hangup, exiting.\n");
             break;
         }
     }
