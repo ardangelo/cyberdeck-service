@@ -27,10 +27,11 @@ struct Opts {
     const char* uart_path = nullptr;
     const char* uinput_path = nullptr;
     bool test_mode = false;
+    bool skip_heartbeat = false;
 };
 
 static void print_usage(const char* argv0) {
-    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--test]\n",
+    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--test] [--skip-heartbeat]\n",
         argv0);
 }
 
@@ -38,15 +39,16 @@ static Opts parse_argv(int argc, char** argv) {
     Opts opts;
 
     static struct option long_options[] = {
-        {"uart",   required_argument, nullptr, 'u'},
-        {"uinput", required_argument, nullptr, 'i'},
-        {"test",   no_argument,       nullptr, 't'},
-        {"help",   no_argument,       nullptr, 'h'},
-        {nullptr,  0,                 nullptr, 0}
+        {"uart",           required_argument, nullptr, 'u'},
+        {"uinput",         required_argument, nullptr, 'i'},
+        {"test",           no_argument,       nullptr, 't'},
+        {"skip-heartbeat", no_argument,       nullptr, 's'},
+        {"help",           no_argument,       nullptr, 'h'},
+        {nullptr,          0,                 nullptr, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "u:i:t:h", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "u:i:t:s:h", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'u':
                 opts.uart_path = optarg;
@@ -56,6 +58,9 @@ static Opts parse_argv(int argc, char** argv) {
                 break;
             case 't':
                 opts.test_mode = true;
+                break;
+            case 's':
+                opts.skip_heartbeat = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -110,32 +115,43 @@ enum class IoctlSetup { Run, Skip };
 class UInputDevice {
 public:
     UInputDevice(const char* path, IoctlSetup setup) {
+        fprintf(stderr, "uinput: opening %s\n", path);
         fd_ = open(path, O_WRONLY | O_NONBLOCK);
         if (fd_ < 0) {
             throw SyscallError("open uinput", errno);
         }
+        fprintf(stderr, "uinput: opened fd=%d\n", fd_);
 
         if (setup == IoctlSetup::Skip) {
+            fprintf(stderr, "uinput: skipping ioctl setup (test mode)\n");
             return;
         }
 
         if (ioctl(fd_, UI_SET_EVBIT, EV_KEY) < 0) {
             throw SyscallError("UI_SET_EVBIT EV_KEY", errno);
         }
+        fprintf(stderr, "uinput: UI_SET_EVBIT EV_KEY ok\n");
 
+        int key_fail = 0;
         for (int i = 0; i <= KEY_MAX; ++i) {
-            ioctl(fd_, UI_SET_KEYBIT, i);
+            if (ioctl(fd_, UI_SET_KEYBIT, i) < 0) {
+                ++key_fail;
+            }
         }
+        fprintf(stderr, "uinput: UI_SET_KEYBIT 0..%d (%d failures)\n",
+            KEY_MAX, key_fail);
 
         if (ioctl(fd_, UI_SET_EVBIT, EV_REL) < 0) {
             throw SyscallError("UI_SET_EVBIT EV_REL", errno);
         }
+        fprintf(stderr, "uinput: UI_SET_EVBIT EV_REL ok\n");
         if (ioctl(fd_, UI_SET_RELBIT, REL_X) < 0) {
             throw SyscallError("UI_SET_RELBIT REL_X", errno);
         }
         if (ioctl(fd_, UI_SET_RELBIT, REL_Y) < 0) {
             throw SyscallError("UI_SET_RELBIT REL_Y", errno);
         }
+        fprintf(stderr, "uinput: UI_SET_RELBIT REL_X/REL_Y ok\n");
 
         struct uinput_setup usetup{};
         snprintf(usetup.name, sizeof(usetup.name), "K230 Virtual Input");
@@ -147,9 +163,15 @@ public:
         if (ioctl(fd_, UI_DEV_SETUP, &usetup) < 0) {
             throw SyscallError("UI_DEV_SETUP", errno);
         }
+        fprintf(stderr, "uinput: UI_DEV_SETUP ok (name=%s bus=0x%x vendor=0x%x product=0x%x)\n",
+            usetup.name, usetup.id.bustype, usetup.id.vendor, usetup.id.product);
+
         if (ioctl(fd_, UI_DEV_CREATE) < 0) {
             throw SyscallError("UI_DEV_CREATE", errno);
         }
+        fprintf(stderr, "uinput: UI_DEV_CREATE ok, waiting for kernel registration...\n");
+        usleep(200000); // 200ms for kernel to register the device
+        fprintf(stderr, "uinput: device created successfully on fd %d\n", fd_);
     }
 
     ~UInputDevice() {
@@ -197,7 +219,13 @@ private:
         ev.type = type;
         ev.code = code;
         ev.value = value;
-        [[maybe_unused]] ssize_t n = write(fd_, &ev, sizeof(ev));
+        ssize_t n = write(fd_, &ev, sizeof(ev));
+        if (n < 0) {
+            fprintf(stderr, "uinput: write failed: %s (fd=%d type=%u code=%u value=%d)\n",
+                strerror(errno), fd_, type, code, value);
+        } else if (n != sizeof(ev)) {
+            fprintf(stderr, "uinput: short write: %zd/%zu\n", n, sizeof(ev));
+        }
     }
 
     int fd_ = -1;
@@ -236,8 +264,12 @@ int main(int argc, char** argv) {
     IoctlSetup ioctl_setup = opts.test_mode ? IoctlSetup::Skip : IoctlSetup::Run;
     UInputDevice uinput(opts.uinput_path, ioctl_setup);
 
-    State state = State::Waiting;
-    fprintf(stderr, "Waiting for heartbeat...\n");
+    State state = opts.skip_heartbeat ? State::Connected : State::Waiting;
+    if (opts.skip_heartbeat) {
+        fprintf(stderr, "Skipping heartbeat, starting connected\n");
+    } else {
+        fprintf(stderr, "Waiting for heartbeat...\n");
+    }
 
     while (!g_stop) {
         auto payload = uart.receive();
