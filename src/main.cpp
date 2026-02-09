@@ -87,6 +87,8 @@ static int open_uart(const char* path) {
     }
 
     cfmakeraw(&tty);
+    cfsetispeed(&tty, B115200);
+    cfsetospeed(&tty, B115200);
     tty.c_cflag |= CLOCAL | CREAD;
     tty.c_cflag &= ~CRTSCTS;
     tty.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
@@ -243,12 +245,21 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Debug: dump received payload
+        fprintf(stderr, "RX [%zu bytes]:", payload.size());
+        for (size_t i = 0; i < payload.size(); ++i) {
+            fprintf(stderr, " %02x", payload[i]);
+        }
+        fprintf(stderr, "\n");
+
         k230_NrfToK230 msg = k230_NrfToK230_init_zero;
         pb_istream_t stream = pb_istream_from_buffer(payload.data(), payload.size());
         if (!pb_decode(&stream, k230_NrfToK230_fields, &msg)) {
             fprintf(stderr, "Warning: pb_decode failed\n");
             continue;
         }
+
+        fprintf(stderr, "Decoded which_msg=%u\n", static_cast<unsigned>(msg.which_msg));
 
         switch (msg.which_msg) {
             case k230_NrfToK230_heartbeat_tag:
@@ -293,7 +304,7 @@ int main(int argc, char** argv) {
     }
 
     fprintf(stderr, "Shutdown sent, exiting\n");
-    send_shutdown(uart);
+    //send_shutdown(uart);
     close(uart_fd);
 
     return 0;
