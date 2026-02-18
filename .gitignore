@@ -1,6 +1,7 @@
 cyberdeck_daemon
 fake_uart
 fake_uinput
+ppouart_test
 
 **/*.o
 

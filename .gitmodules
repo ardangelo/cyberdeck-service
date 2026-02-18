@@ -1,3 +1,6 @@
 [submodule "src/nanopb"]
 	path = src/nanopb
 	url = https://github.com/nanopb/nanopb.git
+[submodule "mobileapp"]
+	path = mobileapp
+	url = https://github.com/coredevices/mobileapp

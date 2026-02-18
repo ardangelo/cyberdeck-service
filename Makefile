@@ -19,7 +19,7 @@ PROTO_OBJS = $(NANOPB_OBJS) $(PEBBLE_OBJS)
 
 .PHONY: all clean proto
 
-all: cyberdeck_daemon fake_uart fake_uinput
+all: cyberdeck_daemon fake_uart fake_uinput ppouart_test
 
 # Generate nanopb files from proto
 proto:
@@ -34,6 +34,9 @@ fake_uart: src/fake_uart.o src/uart.o $(PROTO_OBJS)
 fake_uinput: src/fake_uinput.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+ppouart_test: src/ppouart_test.o src/pebble/cobs.o
+	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 # Compile C++ sources
 src/%.o: src/%.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
@@ -47,4 +50,4 @@ src/nanopb/%.o: src/nanopb/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f cyberdeck_daemon fake_uart fake_uinput src/*.o src/pebble/*.o src/nanopb/*.o
+	rm -f cyberdeck_daemon fake_uart fake_uinput ppouart_test src/*.o src/pebble/*.o src/nanopb/*.o
