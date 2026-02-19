@@ -18,7 +18,6 @@ struct UartJniBridge::Impl {
     jmethodID connect_method = nullptr;
     jmethodID disconnect_method = nullptr;
     jmethodID send_message_method = nullptr;
-    jmethodID set_allow_unknown_endpoints_method = nullptr;
 
     EndpointCallback endpoint_callback;
     ConnectionCallback connected_callback;
@@ -73,11 +72,9 @@ UartJniBridge::UartJniBridge(const std::string& jar_path)
     impl_->connect_method = impl_->env->GetMethodID(impl_->bridge_class, "connect", "()Z");
     impl_->disconnect_method = impl_->env->GetMethodID(impl_->bridge_class, "disconnect", "()V");
     impl_->send_message_method = impl_->env->GetMethodID(impl_->bridge_class, "sendMessage", "(I[B)Z");
-    impl_->set_allow_unknown_endpoints_method = impl_->env->GetMethodID(impl_->bridge_class, "setAllowUnknownEndpoints", "(Z)V");
 
     if (!impl_->init_method || !impl_->connect_method ||
-        !impl_->disconnect_method || !impl_->send_message_method ||
-        !impl_->set_allow_unknown_endpoints_method) {
+        !impl_->disconnect_method || !impl_->send_message_method) {
         throw std::runtime_error("Failed to find methods");
     }
 
@@ -219,19 +216,6 @@ bool UartJniBridge::send_message(uint16_t endpoint, const std::vector<uint8_t>& 
     }
 
     return success;
-}
-
-void UartJniBridge::set_allow_unknown_endpoints(bool allow) {
-    impl_->env->CallVoidMethod(
-        impl_->bridge_obj,
-        impl_->set_allow_unknown_endpoints_method,
-        allow ? JNI_TRUE : JNI_FALSE
-    );
-
-    if (impl_->env->ExceptionCheck()) {
-        impl_->env->ExceptionDescribe();
-        impl_->env->ExceptionClear();
-    }
 }
 
 void UartJniBridge::set_endpoint_callback(EndpointCallback callback) {

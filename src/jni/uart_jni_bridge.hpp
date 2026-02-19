@@ -76,14 +76,6 @@ public:
     bool send_message(uint16_t endpoint, const std::vector<uint8_t>& data);
 
     /**
-     * Enable or disable forwarding of messages on unknown/unregistered endpoints.
-     * By default, only known Pebble protocol endpoints are forwarded.
-     *
-     * @param allow true to forward unknown endpoint messages
-     */
-    void set_allow_unknown_endpoints(bool allow);
-
-    /**
      * Set callback for endpoint messages.
      *
      * @param callback Function to call when endpoint message is received

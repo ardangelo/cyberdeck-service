@@ -106,9 +106,6 @@ int main(int argc, char** argv) {
             std::cout << "\n✗ Protocol session closed" << std::endl;
         });
 
-        // Enable unknown/custom endpoint forwarding
-        bridge.set_allow_unknown_endpoints(true);
-
         // Initialize
         std::cout << "Initializing..." << std::endl;
         if (!bridge.init(device_path)) {
