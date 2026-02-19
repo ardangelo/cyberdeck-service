@@ -7,6 +7,12 @@ CPPFLAGS := -Isrc/nanopb -Isrc
 LDFLAGS  ?=
 LDLIBS   ?=
 
+# JNI configuration
+JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk-riscv64/
+JNI_INCLUDES := -I$(JAVA_HOME)/include -I$(JAVA_HOME)/include/linux
+JNI_CXXFLAGS := $(CXXFLAGS) $(JNI_INCLUDES) -fPIC
+JNI_LDFLAGS  := -shared
+
 # nanopb sources
 NANOPB_SRCS = src/nanopb/pb_encode.c src/nanopb/pb_decode.c src/nanopb/pb_common.c
 NANOPB_OBJS = $(NANOPB_SRCS:.c=.o)
@@ -17,9 +23,11 @@ PEBBLE_OBJS = $(PEBBLE_SRCS:.c=.o)
 
 PROTO_OBJS = $(NANOPB_OBJS) $(PEBBLE_OBJS)
 
-.PHONY: all clean proto
+.PHONY: all clean proto jni
 
 all: cyberdeck_daemon fake_uart fake_uinput ppouart_test
+
+jni: jni_test_daemon
 
 # Generate nanopb files from proto
 proto:
@@ -50,4 +58,14 @@ src/nanopb/%.o: src/nanopb/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f cyberdeck_daemon fake_uart fake_uinput ppouart_test src/*.o src/pebble/*.o src/nanopb/*.o
+	rm -f cyberdeck_daemon fake_uart fake_uinput ppouart_test jni_test_daemon src/*.o src/jni/*.o src/pebble/*.o src/nanopb/*.o
+
+# JNI Bridge targets
+jni_test_daemon: src/jni_test_main.o src/jni/uart_jni_bridge.o
+	$(CXX) $(LDFLAGS) -o $@ $^ -L$(JAVA_HOME)/lib/server -ljvm -Wl,-rpath,$(JAVA_HOME)/lib/server
+
+src/jni_test_main.o: src/jni_test_main.cpp src/jni/uart_jni_bridge.hpp
+	$(CXX) $(CPPFLAGS) $(JNI_CXXFLAGS) -c -o $@ $<
+
+src/jni/uart_jni_bridge.o: src/jni/uart_jni_bridge.cpp src/jni/uart_jni_bridge.hpp
+	$(CXX) $(CPPFLAGS) $(JNI_CXXFLAGS) -c -o $@ $<
