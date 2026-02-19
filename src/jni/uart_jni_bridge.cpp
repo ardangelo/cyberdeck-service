@@ -180,25 +180,45 @@ void UartJniBridge::disconnect() {
 }
 
 bool UartJniBridge::send_message(uint16_t endpoint, const std::vector<uint8_t>& data) {
-    jbyteArray jdata = impl_->env->NewByteArray(data.size());
-    impl_->env->SetByteArrayRegion(jdata, 0, data.size(), reinterpret_cast<const jbyte*>(data.data()));
+    // Get JNIEnv for the current thread — send_message may be called from
+    // a JVM callback thread (Dispatchers.Default), not the main thread.
+    // Using impl_->env (main thread's env) on another thread is undefined.
+    JNIEnv* env = nullptr;
+    bool needs_detach = false;
+    jint status = impl_->jvm->GetEnv((void**)&env, JNI_VERSION_1_8);
+    if (status == JNI_EDETACHED) {
+        if (impl_->jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) {
+            return false;
+        }
+        needs_detach = true;
+    } else if (status != JNI_OK) {
+        return false;
+    }
 
-    jboolean result = impl_->env->CallBooleanMethod(
+    jbyteArray jdata = env->NewByteArray(data.size());
+    env->SetByteArrayRegion(jdata, 0, data.size(), reinterpret_cast<const jbyte*>(data.data()));
+
+    jboolean result = env->CallBooleanMethod(
         impl_->bridge_obj,
         impl_->send_message_method,
         (jint)endpoint,
         jdata
     );
 
-    impl_->env->DeleteLocalRef(jdata);
+    env->DeleteLocalRef(jdata);
 
-    if (impl_->env->ExceptionCheck()) {
-        impl_->env->ExceptionDescribe();
-        impl_->env->ExceptionClear();
-        return false;
+    bool success = (result == JNI_TRUE);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        success = false;
     }
 
-    return result == JNI_TRUE;
+    if (needs_detach) {
+        impl_->jvm->DetachCurrentThread();
+    }
+
+    return success;
 }
 
 void UartJniBridge::set_allow_unknown_endpoints(bool allow) {

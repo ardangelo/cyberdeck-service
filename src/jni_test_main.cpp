@@ -4,6 +4,7 @@
 #include <csignal>
 #include <thread>
 #include <chrono>
+#include <string>
 
 volatile sig_atomic_t g_stop = 0;
 
@@ -46,28 +47,42 @@ int main(int argc, char** argv) {
         // Track connection state
         bool ppog_connected = false;
 
+        static constexpr uint16_t K230_ENDPOINT = 0xCD00;
+        static constexpr uint8_t K230_CHANNEL_TEST = 0x00;
+
         // Set callbacks
-        bridge.set_endpoint_callback([](uint16_t endpoint, const std::vector<uint8_t>& data) {
+        bridge.set_endpoint_callback([&bridge](uint16_t endpoint, const std::vector<uint8_t>& data) {
             std::cout << "\n>>> Endpoint 0x" << std::hex << endpoint << std::dec
                       << " received " << data.size() << " bytes:" << std::endl;
             std::cout << "    Hex: ";
             print_hex(data);
 
-            // Check for firmware test prefix: 0xBEEFCAFE
-            if (data.size() >= 4 &&
-                data[0] == 0xBE && data[1] == 0xEF &&
-                data[2] == 0xCA && data[3] == 0xFE) {
-                std::cout << "    ✓ Test prefix detected!" << std::endl;
+            // Handle K230 endpoint (0xCD00): first byte is channel
+            if (endpoint == K230_ENDPOINT && !data.empty()) {
+                uint8_t channel = data[0];
+                size_t payload_len = data.size() - 1;
 
-                // Print message (skip 4-byte prefix)
-                if (data.size() > 4) {
-                    std::cout << "    Message: ";
-                    for (size_t i = 4; i < data.size(); i++) {
+                std::cout << "    Channel: 0x" << std::hex << static_cast<int>(channel)
+                          << std::dec << ", payload: " << payload_len << " bytes" << std::endl;
+
+                // Print payload as text
+                if (payload_len > 0) {
+                    std::cout << "    Text: ";
+                    for (size_t i = 1; i < data.size(); i++) {
                         std::cout << static_cast<char>(data[i]);
                     }
                     std::cout << std::endl;
                 }
+
+                // Respond on test channel: "[N] bytes received"
+                std::string reply = std::to_string(payload_len) + " bytes received";
+                std::vector<uint8_t> response;
+                response.push_back(K230_CHANNEL_TEST);
+                response.insert(response.end(), reply.begin(), reply.end());
+                bridge.send_message(K230_ENDPOINT, response);
+                std::cout << "    <<< Replied: " << reply << std::endl;
             }
+
             std::cout << std::endl;
         });
 
