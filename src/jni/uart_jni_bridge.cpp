@@ -18,6 +18,7 @@ struct UartJniBridge::Impl {
     jmethodID connect_method = nullptr;
     jmethodID disconnect_method = nullptr;
     jmethodID send_message_method = nullptr;
+    jmethodID send_message_blocking_method = nullptr;
 
     EndpointCallback endpoint_callback;
     ConnectionCallback connected_callback;
@@ -72,9 +73,11 @@ UartJniBridge::UartJniBridge(const std::string& jar_path)
     impl_->connect_method = impl_->env->GetMethodID(impl_->bridge_class, "connect", "()Z");
     impl_->disconnect_method = impl_->env->GetMethodID(impl_->bridge_class, "disconnect", "()V");
     impl_->send_message_method = impl_->env->GetMethodID(impl_->bridge_class, "sendMessage", "(I[B)Z");
+    impl_->send_message_blocking_method = impl_->env->GetMethodID(impl_->bridge_class, "sendMessageBlocking", "(I[B)Z");
 
     if (!impl_->init_method || !impl_->connect_method ||
-        !impl_->disconnect_method || !impl_->send_message_method) {
+        !impl_->disconnect_method || !impl_->send_message_method ||
+        !impl_->send_message_blocking_method) {
         throw std::runtime_error("Failed to find methods");
     }
 
@@ -198,6 +201,45 @@ bool UartJniBridge::send_message(uint16_t endpoint, const std::vector<uint8_t>& 
     jboolean result = env->CallBooleanMethod(
         impl_->bridge_obj,
         impl_->send_message_method,
+        (jint)endpoint,
+        jdata
+    );
+
+    env->DeleteLocalRef(jdata);
+
+    bool success = (result == JNI_TRUE);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        success = false;
+    }
+
+    if (needs_detach) {
+        impl_->jvm->DetachCurrentThread();
+    }
+
+    return success;
+}
+
+bool UartJniBridge::send_message_blocking(uint16_t endpoint, const std::vector<uint8_t>& data) {
+    JNIEnv* env = nullptr;
+    bool needs_detach = false;
+    jint status = impl_->jvm->GetEnv((void**)&env, JNI_VERSION_1_8);
+    if (status == JNI_EDETACHED) {
+        if (impl_->jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) {
+            return false;
+        }
+        needs_detach = true;
+    } else if (status != JNI_OK) {
+        return false;
+    }
+
+    jbyteArray jdata = env->NewByteArray(data.size());
+    env->SetByteArrayRegion(jdata, 0, data.size(), reinterpret_cast<const jbyte*>(data.data()));
+
+    jboolean result = env->CallBooleanMethod(
+        impl_->bridge_obj,
+        impl_->send_message_blocking_method,
         (jint)endpoint,
         jdata
     );

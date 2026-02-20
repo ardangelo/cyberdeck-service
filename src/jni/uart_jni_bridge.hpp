@@ -67,13 +67,23 @@ public:
     void disconnect();
 
     /**
-     * Send message to endpoint.
+     * Send message to endpoint (async, fire-and-forget).
      *
      * @param endpoint Endpoint number
      * @param data Message data
-     * @return true if sent successfully
+     * @return true if queued successfully
      */
     bool send_message(uint16_t endpoint, const std::vector<uint8_t>& data);
+
+    /**
+     * Send message to endpoint and block until written to UART.
+     * Do NOT call from within a JNI callback — use send_message instead.
+     *
+     * @param endpoint Endpoint number
+     * @param data Message data
+     * @return true if written to UART, false on error or timeout
+     */
+    bool send_message_blocking(uint16_t endpoint, const std::vector<uint8_t>& data);
 
     /**
      * Set callback for endpoint messages.

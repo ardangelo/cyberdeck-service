@@ -1,7 +1,8 @@
-#include "uart.hpp"
+#include "jni/uart_jni_bridge.hpp"
 
 extern "C" {
 #include "nanopb/pb_decode.h"
+#include "nanopb/pb_encode.h"
 #include "pebble/k230_protocol.pb.h"
 }
 
@@ -12,26 +13,22 @@ extern "C" {
 #include <fcntl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/time.h>
-#include <termios.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t g_stop = 0;
 
-static void signal_handler(int) {
-    g_stop = 1;
-}
-
 struct Opts {
     const char* uart_path = nullptr;
     const char* uinput_path = nullptr;
+    const char* jar_path = "/tmp/libpebble3-jvm-fat.jar";
     bool test_mode = false;
-    bool skip_heartbeat = false;
 };
 
 static void print_usage(const char* argv0) {
-    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--test] [--skip-heartbeat]\n",
+    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--jar=<path>] [--test]\n",
         argv0);
 }
 
@@ -39,16 +36,16 @@ static Opts parse_argv(int argc, char** argv) {
     Opts opts;
 
     static struct option long_options[] = {
-        {"uart",           required_argument, nullptr, 'u'},
-        {"uinput",         required_argument, nullptr, 'i'},
-        {"test",           no_argument,       nullptr, 't'},
-        {"skip-heartbeat", no_argument,       nullptr, 's'},
-        {"help",           no_argument,       nullptr, 'h'},
-        {nullptr,          0,                 nullptr, 0}
+        {"uart",   required_argument, nullptr, 'u'},
+        {"uinput", required_argument, nullptr, 'i'},
+        {"jar",    required_argument, nullptr, 'j'},
+        {"test",   no_argument,       nullptr, 't'},
+        {"help",   no_argument,       nullptr, 'h'},
+        {nullptr,  0,                 nullptr, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "u:i:t:s:h", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "u:i:j:th", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'u':
                 opts.uart_path = optarg;
@@ -56,58 +53,27 @@ static Opts parse_argv(int argc, char** argv) {
             case 'i':
                 opts.uinput_path = optarg;
                 break;
+            case 'j':
+                opts.jar_path = optarg;
+                break;
             case 't':
                 opts.test_mode = true;
-                break;
-            case 's':
-                opts.skip_heartbeat = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
                 exit(0);
             default:
                 print_usage(argv[0]);
-                throw UartError("invalid arguments");
+                exit(1);
         }
     }
 
-    if ((!opts.uart_path) || (!opts.uinput_path)) {
+    if (!opts.uart_path || !opts.uinput_path) {
         print_usage(argv[0]);
-        throw UartError("missing required arguments");
+        exit(1);
     }
 
     return opts;
-}
-
-static int open_uart(const char* path) {
-    int fd = open(path, O_RDWR | O_NOCTTY);
-    if (fd < 0) {
-        throw SyscallError("open uart", errno);
-    }
-
-    struct termios tty{};
-    if (tcgetattr(fd, &tty) < 0) {
-        close(fd);
-        throw SyscallError("tcgetattr", errno);
-    }
-
-    cfmakeraw(&tty);
-    cfsetispeed(&tty, B115200);
-    cfsetospeed(&tty, B115200);
-    tty.c_cflag |= CLOCAL | CREAD;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
-    tty.c_cflag |= CS8;
-
-    tty.c_cc[VMIN] = 1;
-    tty.c_cc[VTIME] = 0;
-
-    if (tcsetattr(fd, TCSANOW, &tty) < 0) {
-        close(fd);
-        throw SyscallError("tcsetattr", errno);
-    }
-
-    return fd;
 }
 
 enum class IoctlSetup { Run, Skip };
@@ -118,7 +84,8 @@ public:
         fprintf(stderr, "uinput: opening %s\n", path);
         fd_ = open(path, O_WRONLY | O_NONBLOCK);
         if (fd_ < 0) {
-            throw SyscallError("open uinput", errno);
+            fprintf(stderr, "uinput: open failed: %s\n", strerror(errno));
+            return;
         }
         fprintf(stderr, "uinput: opened fd=%d\n", fd_);
 
@@ -128,30 +95,20 @@ public:
         }
 
         if (ioctl(fd_, UI_SET_EVBIT, EV_KEY) < 0) {
-            throw SyscallError("UI_SET_EVBIT EV_KEY", errno);
+            fprintf(stderr, "uinput: UI_SET_EVBIT EV_KEY failed: %s\n", strerror(errno));
+            return;
         }
-        fprintf(stderr, "uinput: UI_SET_EVBIT EV_KEY ok\n");
 
-        int key_fail = 0;
         for (int i = 0; i <= KEY_MAX; ++i) {
-            if (ioctl(fd_, UI_SET_KEYBIT, i) < 0) {
-                ++key_fail;
-            }
+            ioctl(fd_, UI_SET_KEYBIT, i);
         }
-        fprintf(stderr, "uinput: UI_SET_KEYBIT 0..%d (%d failures)\n",
-            KEY_MAX, key_fail);
 
         if (ioctl(fd_, UI_SET_EVBIT, EV_REL) < 0) {
-            throw SyscallError("UI_SET_EVBIT EV_REL", errno);
+            fprintf(stderr, "uinput: UI_SET_EVBIT EV_REL failed: %s\n", strerror(errno));
+            return;
         }
-        fprintf(stderr, "uinput: UI_SET_EVBIT EV_REL ok\n");
-        if (ioctl(fd_, UI_SET_RELBIT, REL_X) < 0) {
-            throw SyscallError("UI_SET_RELBIT REL_X", errno);
-        }
-        if (ioctl(fd_, UI_SET_RELBIT, REL_Y) < 0) {
-            throw SyscallError("UI_SET_RELBIT REL_Y", errno);
-        }
-        fprintf(stderr, "uinput: UI_SET_RELBIT REL_X/REL_Y ok\n");
+        ioctl(fd_, UI_SET_RELBIT, REL_X);
+        ioctl(fd_, UI_SET_RELBIT, REL_Y);
 
         struct uinput_setup usetup{};
         snprintf(usetup.name, sizeof(usetup.name), "K230 Virtual Input");
@@ -161,17 +118,16 @@ public:
         usetup.id.version = 1;
 
         if (ioctl(fd_, UI_DEV_SETUP, &usetup) < 0) {
-            throw SyscallError("UI_DEV_SETUP", errno);
+            fprintf(stderr, "uinput: UI_DEV_SETUP failed: %s\n", strerror(errno));
+            return;
         }
-        fprintf(stderr, "uinput: UI_DEV_SETUP ok (name=%s bus=0x%x vendor=0x%x product=0x%x)\n",
-            usetup.name, usetup.id.bustype, usetup.id.vendor, usetup.id.product);
 
         if (ioctl(fd_, UI_DEV_CREATE) < 0) {
-            throw SyscallError("UI_DEV_CREATE", errno);
+            fprintf(stderr, "uinput: UI_DEV_CREATE failed: %s\n", strerror(errno));
+            return;
         }
-        fprintf(stderr, "uinput: UI_DEV_CREATE ok, waiting for kernel registration...\n");
-        usleep(200000); // 200ms for kernel to register the device
-        fprintf(stderr, "uinput: device created successfully on fd %d\n", fd_);
+        fprintf(stderr, "uinput: device created on fd %d\n", fd_);
+        usleep(200000);
     }
 
     ~UInputDevice() {
@@ -223,121 +179,154 @@ private:
         if (n < 0) {
             fprintf(stderr, "uinput: write failed: %s (fd=%d type=%u code=%u value=%d)\n",
                 strerror(errno), fd_, type, code, value);
-        } else if (n != sizeof(ev)) {
-            fprintf(stderr, "uinput: short write: %zd/%zu\n", n, sizeof(ev));
         }
     }
 
     int fd_ = -1;
 };
 
-enum class State { Waiting, Connected };
+static constexpr uint16_t K230_ENDPOINT = 0xCD00;
 
-static void send_ack(Uart& uart) {
+static void send_disconnect(cyberdeck::UartJniBridge& bridge) {
     k230_K230ToNrf msg = k230_K230ToNrf_init_zero;
-    msg.which_msg = k230_K230ToNrf_ack_tag;
-    msg.msg.ack.sequence = 0;
-    uart.send(msg);
+    msg.which_msg = k230_K230ToNrf_disconnect_tag;
+
+    uint8_t buf[k230_K230ToNrf_size];
+    pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&stream, k230_K230ToNrf_fields, &msg)) {
+        fprintf(stderr, "Failed to encode Disconnect message\n");
+        return;
+    }
+
+    std::vector<uint8_t> data(buf, buf + stream.bytes_written);
+    if (bridge.send_message_blocking(K230_ENDPOINT, data)) {
+        fprintf(stderr, "Disconnect message written to UART\n");
+    } else {
+        fprintf(stderr, "Failed to send Disconnect (timeout or error)\n");
+    }
 }
 
-static void send_shutdown(Uart& uart) {
-    k230_K230ToNrf msg = k230_K230ToNrf_init_zero;
-    msg.which_msg = k230_K230ToNrf_shutdown_tag;
-    uart.send(msg);
+// Signal mask for SIGINT/SIGTERM — used with sigtimedwait()
+static sigset_t g_sigmask;
+
+static bool check_signal() {
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 }; // 100ms
+    int sig = sigtimedwait(&g_sigmask, nullptr, &ts);
+    if (sig > 0) {
+        g_stop = 1;
+        return true;
+    }
+    return false;
 }
 
 int main(int argc, char** argv) {
-    install_terminate_handler();
-
     Opts opts = parse_argv(argc, argv);
 
-    struct sigaction sa{};
-    sa.sa_handler = signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
-
-    int uart_fd = open_uart(opts.uart_path);
-    Uart uart(uart_fd);
+    // Block SIGINT/SIGTERM on the main thread BEFORE creating the JVM.
+    // JVM threads inherit this mask, so signals never reach them.
+    sigemptyset(&g_sigmask);
+    sigaddset(&g_sigmask, SIGINT);
+    sigaddset(&g_sigmask, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &g_sigmask, nullptr);
 
     IoctlSetup ioctl_setup = opts.test_mode ? IoctlSetup::Skip : IoctlSetup::Run;
     UInputDevice uinput(opts.uinput_path, ioctl_setup);
 
-    State state = opts.skip_heartbeat ? State::Connected : State::Waiting;
-    if (opts.skip_heartbeat) {
-        fprintf(stderr, "Skipping heartbeat, starting connected\n");
-    } else {
-        fprintf(stderr, "Waiting for heartbeat...\n");
-    }
+    fprintf(stderr, "Creating JNI bridge (JAR: %s)...\n", opts.jar_path);
+    cyberdeck::UartJniBridge bridge(opts.jar_path);
 
-    while (!g_stop) {
-        auto payload = uart.receive();
-        if (payload.empty()) {
-            continue;
+    volatile bool connected = false;
+
+    bridge.set_endpoint_callback([&uinput](uint16_t endpoint, const std::vector<uint8_t>& data) {
+        if (endpoint != K230_ENDPOINT) {
+            fprintf(stderr, "Ignoring endpoint 0x%04x (%zu bytes)\n", endpoint, data.size());
+            return;
         }
 
-        // Debug: dump received payload
-        fprintf(stderr, "RX [%zu bytes]:", payload.size());
-        for (size_t i = 0; i < payload.size(); ++i) {
-            fprintf(stderr, " %02x", payload[i]);
+        if (data.empty()) {
+            fprintf(stderr, "K230: empty payload\n");
+            return;
         }
-        fprintf(stderr, "\n");
 
         k230_NrfToK230 msg = k230_NrfToK230_init_zero;
-        pb_istream_t stream = pb_istream_from_buffer(payload.data(), payload.size());
+        pb_istream_t stream = pb_istream_from_buffer(data.data(), data.size());
         if (!pb_decode(&stream, k230_NrfToK230_fields, &msg)) {
-            fprintf(stderr, "Warning: pb_decode failed\n");
-            continue;
+            fprintf(stderr, "K230: pb_decode failed\n");
+            return;
         }
 
-        fprintf(stderr, "Decoded which_msg=%u\n", static_cast<unsigned>(msg.which_msg));
-
         switch (msg.which_msg) {
-            case k230_NrfToK230_heartbeat_tag:
-                fprintf(stderr, "Heartbeat received, sending ACK\n");
-                send_ack(uart);
-                if (state == State::Waiting) {
-                    state = State::Connected;
-                    fprintf(stderr, "Connected\n");
-                }
+            case k230_NrfToK230_keyboard_tag: {
+                auto& kb = msg.msg.keyboard;
+                fprintf(stderr, "Keyboard %u %s\n", kb.keycode,
+                    kb.is_down ? "down" : "up");
+                uinput.emit_key(static_cast<uint16_t>(kb.keycode),
+                    kb.is_down ? 1 : 0);
+                uinput.emit_sync();
                 break;
+            }
 
-            case k230_NrfToK230_keyboard_tag:
-                if (state == State::Connected) {
-                    auto& kb = msg.msg.keyboard;
-                    fprintf(stderr, "Keyboard %u %s\n", kb.keycode,
-                        kb.is_down ? "down" : "up");
-                    uinput.emit_key(static_cast<uint16_t>(kb.keycode),
-                        kb.is_down ? 1 : 0);
-                    uinput.emit_sync();
+            case k230_NrfToK230_touchpad_tag: {
+                auto& tp = msg.msg.touchpad;
+                fprintf(stderr, "Touchpad %d %d\n", tp.delta_x, tp.delta_y);
+                if (tp.delta_x != 0) {
+                    uinput.emit_rel(REL_X, tp.delta_x);
                 }
+                if (tp.delta_y != 0) {
+                    uinput.emit_rel(REL_Y, tp.delta_y);
+                }
+                uinput.emit_sync();
                 break;
+            }
 
-            case k230_NrfToK230_touchpad_tag:
-                if (state == State::Connected) {
-                    auto& tp = msg.msg.touchpad;
-                    fprintf(stderr, "Touchpad %d %d\n", tp.delta_x, tp.delta_y);
-                    if (tp.delta_x != 0) {
-                        uinput.emit_rel(REL_X, tp.delta_x);
-                    }
-                    if (tp.delta_y != 0) {
-                        uinput.emit_rel(REL_Y, tp.delta_y);
-                    }
-                    uinput.emit_sync();
-                }
+            case k230_NrfToK230_redraw_display_tag:
+                fprintf(stderr, "RedrawDisplay (ignored)\n");
                 break;
 
             default:
-                fprintf(stderr, "Warning: unknown message type %u\n",
+                fprintf(stderr, "K230: unknown msg tag=%u\n",
                     static_cast<unsigned>(msg.which_msg));
                 break;
         }
+    });
+
+    bridge.set_connected_callback([]() {
+        fprintf(stderr, "UART connected, waiting for PPoG handshake...\n");
+    });
+
+    bridge.set_session_opened_callback([&connected]() {
+        connected = true;
+        fprintf(stderr, "PPoG session opened, ready\n");
+    });
+
+    bridge.set_disconnected_callback([]() {
+        fprintf(stderr, "PPoG session closed\n");
+    });
+
+    fprintf(stderr, "Initializing bridge on %s...\n", opts.uart_path);
+    if (!bridge.init(opts.uart_path)) {
+        fprintf(stderr, "Failed to initialize bridge\n");
+        return 1;
     }
 
-    fprintf(stderr, "Shutdown sent, exiting\n");
-    //send_shutdown(uart);
-    close(uart_fd);
+    if (!bridge.connect()) {
+        fprintf(stderr, "Failed to connect\n");
+        return 1;
+    }
+
+    // Poll for signals with sigtimedwait (100ms timeout) — signals are blocked
+    // on all threads, so JVM internals are never disrupted by SIGINT/SIGTERM.
+    while (!connected && !g_stop) {
+        check_signal();
+    }
+
+    while (!g_stop) {
+        check_signal();
+    }
+
+    fprintf(stderr, "Shutting down...\n");
+    send_disconnect(bridge);
+    bridge.disconnect();
 
     return 0;
 }
