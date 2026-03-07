@@ -7,7 +7,7 @@ CPPFLAGS := -Isrc/nanopb -Isrc
 LDFLAGS  ?=
 
 # JNI
-JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk-riscv64/
+JAVA_HOME ?= /usr/lib/jvm/java-21-openjdk-riscv64/
 JNI_CPPFLAGS := $(CPPFLAGS) -I$(JAVA_HOME)/include -I$(JAVA_HOME)/include/linux
 JNI_CXXFLAGS := $(CXXFLAGS)
 JNI_LDFLAGS := -L$(JAVA_HOME)/lib/server -ljvm -Wl,-rpath,$(JAVA_HOME)/lib/server

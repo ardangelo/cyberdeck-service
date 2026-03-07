@@ -16,7 +16,18 @@ extern "C" {
 #include <pthread.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
+
+#ifndef DRM_IOCTL_BASE
+#define DRM_IOCTL_BASE 'd'
+#endif
+#ifndef DRM_COMMAND_BASE
+#define DRM_COMMAND_BASE 0x40
+#endif
+#ifndef DRM_IO
+#define DRM_IO(nr) _IO(DRM_IOCTL_BASE, nr)
+#endif
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -24,11 +35,12 @@ struct Opts {
     const char* uart_path = nullptr;
     const char* uinput_path = nullptr;
     const char* jar_path = "/tmp/libpebble3-jvm-fat.jar";
+    const char* display_path = nullptr;
     bool test_mode = false;
 };
 
 static void print_usage(const char* argv0) {
-    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--jar=<path>] [--test]\n",
+    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--jar=<path>] [--display=<path>] [--test]\n",
         argv0);
 }
 
@@ -36,16 +48,17 @@ static Opts parse_argv(int argc, char** argv) {
     Opts opts;
 
     static struct option long_options[] = {
-        {"uart",   required_argument, nullptr, 'u'},
-        {"uinput", required_argument, nullptr, 'i'},
-        {"jar",    required_argument, nullptr, 'j'},
-        {"test",   no_argument,       nullptr, 't'},
-        {"help",   no_argument,       nullptr, 'h'},
-        {nullptr,  0,                 nullptr, 0}
+        {"uart",    required_argument, nullptr, 'u'},
+        {"uinput",  required_argument, nullptr, 'i'},
+        {"jar",     required_argument, nullptr, 'j'},
+        {"display", required_argument, nullptr, 'd'},
+        {"test",    no_argument,       nullptr, 't'},
+        {"help",    no_argument,       nullptr, 'h'},
+        {nullptr,   0,                 nullptr, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "u:i:j:th", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "u:i:j:d:th", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'u':
                 opts.uart_path = optarg;
@@ -55,6 +68,9 @@ static Opts parse_argv(int argc, char** argv) {
                 break;
             case 'j':
                 opts.jar_path = optarg;
+                break;
+            case 'd':
+                opts.display_path = optarg;
                 break;
             case 't':
                 opts.test_mode = true;
@@ -187,6 +203,53 @@ private:
 
 static constexpr uint16_t K230_ENDPOINT = 0xCD00;
 
+class DisplayDevice {
+public:
+    explicit DisplayDevice(const char* path) : path_(path) {}
+
+    ~DisplayDevice() {
+        if (fd_ >= 0) close(fd_);
+    }
+
+    DisplayDevice(const DisplayDevice&) = delete;
+    DisplayDevice& operator=(const DisplayDevice&) = delete;
+
+    void redraw() {
+        if (!path_) {
+            return;
+        }
+        fprintf(stderr, "RedrawDisplay\n");
+        if (!ensure_open()) return;
+        if (ioctl(fd_, kDrmIoctlSharpRedraw, 0) < 0) {
+            fprintf(stderr, "display: redraw ioctl failed on %s: %s\n",
+                path_, strerror(errno));
+            close(fd_);
+            fd_ = -1;
+            return;
+        }
+        fprintf(stderr, "display: redraw ioctl sent on %s\n", path_);
+    }
+
+private:
+    bool ensure_open() {
+        if (fd_ >= 0) return true;
+        fd_ = open(path_, O_WRONLY | O_CLOEXEC);
+        if (fd_ < 0) {
+            fprintf(stderr, "display: open %s failed: %s\n", path_, strerror(errno));
+            return false;
+        }
+        fprintf(stderr, "display: opened %s (fd=%d)\n", path_, fd_);
+        return true;
+    }
+
+    static constexpr unsigned int kDrmSharpRedraw = 0x00;
+    static constexpr unsigned long kDrmIoctlSharpRedraw =
+        DRM_IO(DRM_COMMAND_BASE + kDrmSharpRedraw);
+
+    const char* path_;
+    int fd_ = -1;
+};
+
 static void send_disconnect(cyberdeck::UartJniBridge& bridge) {
     k230_K230ToNrf msg = k230_K230ToNrf_init_zero;
     msg.which_msg = k230_K230ToNrf_disconnect_tag;
@@ -231,13 +294,14 @@ int main(int argc, char** argv) {
 
     IoctlSetup ioctl_setup = opts.test_mode ? IoctlSetup::Skip : IoctlSetup::Run;
     UInputDevice uinput(opts.uinput_path, ioctl_setup);
+    DisplayDevice display(opts.display_path);
 
     fprintf(stderr, "Creating JNI bridge (JAR: %s)...\n", opts.jar_path);
     cyberdeck::UartJniBridge bridge(opts.jar_path);
 
     volatile bool connected = false;
 
-    bridge.set_endpoint_callback([&uinput](uint16_t endpoint, const std::vector<uint8_t>& data) {
+    bridge.set_endpoint_callback([&uinput, &display](uint16_t endpoint, const std::vector<uint8_t>& data) {
         if (endpoint != K230_ENDPOINT) {
             fprintf(stderr, "Ignoring endpoint 0x%04x (%zu bytes)\n", endpoint, data.size());
             return;
@@ -280,7 +344,7 @@ int main(int argc, char** argv) {
             }
 
             case k230_NrfToK230_redraw_display_tag:
-                fprintf(stderr, "RedrawDisplay (ignored)\n");
+                display.redraw();
                 break;
 
             default:
