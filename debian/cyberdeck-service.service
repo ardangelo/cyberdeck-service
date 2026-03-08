@@ -1,0 +1,16 @@
+[Unit]
+Description=Cyberdeck Service Daemon
+After=network.target
+
+[Service]
+Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-riscv64
+ExecStart=/usr/bin/cyberdeck_daemon \
+    --uart=/dev/ttyS2 \
+    --uinput=/dev/uinput \
+    --jar=/usr/lib/cyberdeck-service/libpebble3-jvm-fat.jar \
+    --display=/dev/dri/card0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

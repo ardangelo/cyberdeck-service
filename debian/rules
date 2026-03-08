@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	cd mobileapp && ./gradlew :libpebble3:jvmFatJar
+	$(MAKE) cyberdeck_daemon
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -d debian/cyberdeck-service/usr/bin
+	install -m 755 cyberdeck_daemon debian/cyberdeck-service/usr/bin/cyberdeck_daemon
+	install -d debian/cyberdeck-service/usr/lib/cyberdeck-service
+	install -m 644 mobileapp/libpebble3/build/libs/libpebble3-jvm-fat.jar \
+		debian/cyberdeck-service/usr/lib/cyberdeck-service/

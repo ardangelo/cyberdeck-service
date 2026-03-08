@@ -1,0 +1,19 @@
+Source: cyberdeck-service
+Section: utils
+Priority: optional
+Maintainer: Andrew D'Angelo <dangeloandrew@outlook.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ g++,
+ default-jdk-headless,
+ python3
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: cyberdeck-service
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         default-jre-headless,
+         uinput
+Description: Cyberdeck UART bridge daemon
+ Manages nRF5 UART link to Linux
