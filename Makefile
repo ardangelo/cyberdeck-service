@@ -10,7 +10,7 @@ LDFLAGS  ?=
 JAVA_HOME ?= /usr/lib/jvm/java-21-openjdk-riscv64/
 JNI_CPPFLAGS := $(CPPFLAGS) -I$(JAVA_HOME)/include -I$(JAVA_HOME)/include/linux
 JNI_CXXFLAGS := $(CXXFLAGS)
-JNI_LDFLAGS := -L$(JAVA_HOME)/lib/server -ljvm -Wl,-rpath,$(JAVA_HOME)/lib/server
+JNI_LDFLAGS := -ldl
 
 # nanopb sources
 PROTO_SRCS = src/nanopb/pb_encode.c src/nanopb/pb_decode.c src/nanopb/pb_common.c src/pebble/k230_protocol.pb.c

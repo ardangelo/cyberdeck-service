@@ -1,4 +1,5 @@
 #include "uart_jni_bridge.hpp"
+#include <dlfcn.h>
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
@@ -9,6 +10,7 @@ namespace cyberdeck {
 static UartJniBridge* g_bridge_instance = nullptr;
 
 struct UartJniBridge::Impl {
+    void* jvm_lib = nullptr;
     JavaVM* jvm = nullptr;
     JNIEnv* env = nullptr;
     jobject bridge_obj = nullptr;
@@ -49,7 +51,27 @@ UartJniBridge::UartJniBridge(const std::string& jar_path)
     vm_args.options = options;
     vm_args.ignoreUnrecognized = JNI_FALSE;
 
-    jint result = JNI_CreateJavaVM(&impl_->jvm, (void**)&impl_->env, &vm_args);
+    const char* java_home = getenv("JAVA_HOME");
+    std::string libjvm_path;
+    if (java_home) {
+        libjvm_path = std::string(java_home) + "/lib/server/libjvm.so";
+    } else {
+        libjvm_path = "/usr/lib/jvm/default-java/lib/server/libjvm.so";
+    }
+
+    impl_->jvm_lib = dlopen(libjvm_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (!impl_->jvm_lib) {
+        throw std::runtime_error(std::string("dlopen libjvm.so failed: ") + dlerror());
+    }
+
+    using JNI_CreateJavaVM_fn = jint (*)(JavaVM**, void**, void*);
+    auto create_jvm = reinterpret_cast<JNI_CreateJavaVM_fn>(
+        dlsym(impl_->jvm_lib, "JNI_CreateJavaVM"));
+    if (!create_jvm) {
+        throw std::runtime_error("dlsym JNI_CreateJavaVM failed");
+    }
+
+    jint result = create_jvm(&impl_->jvm, (void**)&impl_->env, &vm_args);
     if (result != JNI_OK) {
         throw std::runtime_error("Failed to create JVM");
     }
@@ -139,6 +161,10 @@ UartJniBridge::~UartJniBridge() {
 
     if (impl_->jvm) {
         impl_->jvm->DestroyJavaVM();
+    }
+
+    if (impl_->jvm_lib) {
+        dlclose(impl_->jvm_lib);
     }
 
     g_bridge_instance = nullptr;
