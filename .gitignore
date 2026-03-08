@@ -4,4 +4,12 @@ fake_uinput
 ppouart_test
 
 **/*.o
+**/*.pb.c
+**/*.pb.h
 
+debian/.debhelper/
+debian/*.debhelper
+debian/*.substvars
+debian/cyberdeck-service/
+debian/debhelper-build-stamp
+debian/files

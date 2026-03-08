@@ -1,5 +1,12 @@
 #!/usr/bin/make -f
 
+include /usr/share/dpkg/architecture.mk
+
+ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+export CXX := $(DEB_HOST_GNU_TYPE)-g++
+export CC  := $(DEB_HOST_GNU_TYPE)-gcc
+endif
+
 %:
 	dh $@
 
@@ -7,9 +14,11 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	cd mobileapp && ./gradlew :libpebble3:jvmFatJar
-	$(MAKE) cyberdeck_daemon
+	$(MAKE) cyberdeck_daemon JAVA_HOME=/usr/lib/jvm/default-java
 
 override_dh_auto_test:
+
+override_dh_shlibdeps:
 
 override_dh_auto_install:
 	install -d debian/cyberdeck-service/usr/bin
