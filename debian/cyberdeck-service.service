@@ -5,6 +5,13 @@ After=network.target
 [Service]
 Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-riscv64
 StateDirectory=cyberdeck-service
+# loadkeys -C /dev/tty1 needs CAP_SYS_TTY_CONFIG and a writable tty.
+AmbientCapabilities=CAP_SYS_TTY_CONFIG
+CapabilityBoundingSet=CAP_SYS_TTY_CONFIG
+DeviceAllow=/dev/tty1 rw
+DeviceAllow=/dev/uinput rw
+DeviceAllow=/dev/ttyS2 rw
+DeviceAllow=/dev/dri/card0 rw
 ExecStart=/usr/bin/cyberdeck_daemon \
     --uart=/dev/ttyS2 \
     --uinput=/dev/uinput \
