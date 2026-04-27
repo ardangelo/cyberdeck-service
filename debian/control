@@ -13,6 +13,7 @@ Rules-Requires-Root: no
 Package: cyberdeck-service
 Architecture: any
 Depends: ${misc:Depends},
+         kbd,
          libstdc++6,
          default-jre-headless
 Description: Cyberdeck UART bridge daemon

@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-riscv64
+StateDirectory=cyberdeck-service
 ExecStart=/usr/bin/cyberdeck_daemon \
     --uart=/dev/ttyS2 \
     --uinput=/dev/uinput \

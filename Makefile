@@ -16,9 +16,12 @@ JNI_LDFLAGS := -ldl
 PROTO_SRCS = src/nanopb/pb_encode.c src/nanopb/pb_decode.c src/nanopb/pb_common.c src/pebble/k230_protocol.pb.c
 PROTO_OBJS = $(PROTO_SRCS:.c=.o)
 
-.PHONY: all clean deb
+.PHONY: all clean deb fatjar
 
 all: cyberdeck_daemon fake_uinput jni_test_daemon
+
+fatjar:
+	cd mobileapp && ./gradlew :libpebble3:jvmFatJar
 
 fake_uinput: src/fake_uinput.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
@@ -51,6 +54,5 @@ src/pebble/%.o: src/pebble/%.c
 clean:
 	rm -f cyberdeck_daemon fake_uinput jni_test_daemon src/*.o src/jni/*.o \
 		src/nanopb/*.o src/nanopb/*.pb.c src/nanopb/*.pb.h
-
 deb:
 	dpkg-buildpackage -us -uc --host-arch riscv64
