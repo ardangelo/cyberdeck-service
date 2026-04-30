@@ -45,12 +45,105 @@ extern "C" {
 #ifndef DRM_IO
 #define DRM_IO(nr) _IO(DRM_IOCTL_BASE, nr)
 #endif
+#ifndef DRM_IOW
+#define DRM_IOW(nr, type) _IOW(DRM_IOCTL_BASE, nr, type)
+#endif
+#ifndef DRM_IOWR
+#define DRM_IOWR(nr, type) _IOWR(DRM_IOCTL_BASE, nr, type)
+#endif
 
 static volatile sig_atomic_t g_stop = 0;
 static constexpr uint16_t K230_ENDPOINT = 0xCD00;
 static constexpr uint16_t K230_RESERVED_KEYCODE_BASE = 200;
 static constexpr const char *kGeneratedKeymapFile = "cyberdeck.kmap";
 static constexpr const char *kConsoleDevice = "/dev/tty1";
+static constexpr int kIndicatorWidth = 14;
+static constexpr int kIndicatorHeight = 14;
+static constexpr size_t kIndicatorPixels = kIndicatorWidth * kIndicatorHeight;
+static constexpr size_t kMaxIndicators = 5;
+
+static constexpr const char* kIndicatorRows[kMaxIndicators][kIndicatorHeight] = {
+    {
+        "..............",
+        ".############.",
+        ".#####..#####.",
+        ".####....####.",
+        ".###......###.",
+        ".##........##.",
+        ".#..........#.",
+        ".####....####.",
+        ".####....####.",
+        ".####....####.",
+        ".####....####.",
+        ".####....####.",
+        ".############.",
+        "..............",
+    },
+    {
+        "..............",
+        ".############.",
+        ".############.",
+        ".###.......##.",
+        ".##.........#.",
+        ".########...#.",
+        ".###........#.",
+        ".#..........#.",
+        ".#...####...#.",
+        ".##...##....#.",
+        ".###....#...#.",
+        ".############.",
+        ".############.",
+        "..............",
+    },
+    {
+        "..............",
+        ".############.",
+        ".############.",
+        ".############.",
+        ".#####..#####.",
+        ".####....####.",
+        ".###......###.",
+        ".##...##...##.",
+        ".#...####...#.",
+        ".#..######..#.",
+        ".############.",
+        ".############.",
+        ".############.",
+        "..............",
+    },
+    {
+        "..............",
+        ".############.",
+        ".############.",
+        ".#...##.....#.",
+        ".#...##.....#.",
+        ".##...#######.",
+        ".###...######.",
+        ".####...#####.",
+        ".#####...####.",
+        ".######.....#.",
+        ".#######....#.",
+        ".############.",
+        ".############.",
+        "..............",
+    },
+    {
+        "..............",
+        ".############.",
+        ".###......###.",
+        ".##........##.",
+        ".#...####...#.",
+        ".#....#######.",
+        ".###.....####.",
+        ".####.....###.",
+        ".######.....#.",
+        ".#...####...#.",
+        ".##........##.",
+        ".###......###.",
+        ".############.",
+        "..............",
+    },
+};
 
 struct Opts {
     const char* uart_path = nullptr;
@@ -236,6 +329,7 @@ public:
     explicit DisplayDevice(const char* path) : path_(path) {}
 
     ~DisplayDevice() {
+        clear_indicators();
         if (fd_ >= 0) {
             close(fd_);
         }
@@ -262,7 +356,92 @@ public:
         fprintf(stderr, "display: redraw ioctl sent on %s\n", path_);
     }
 
+    void set_indicator(uint32_t indicator_idx, bool visible) {
+        if (!path_) {
+            return;
+        }
+        if (indicator_idx >= indicators_.size()) {
+            fprintf(stderr, "display: invalid sticky indicator index %u\n", indicator_idx);
+            return;
+        }
+        if (!ensure_open()) {
+            return;
+        }
+
+        auto& indicator = indicators_[indicator_idx];
+        if (visible) {
+            if (!ensure_indicator_storage(indicator_idx, indicator)) {
+                return;
+            }
+            if (indicator.visible) {
+                return;
+            }
+
+            SharpMemoryIoctlOvShow show{};
+            show.in_storage = indicator.storage;
+            if (ioctl(fd_, kDrmIoctlSharpOvShow, &show) < 0) {
+                fprintf(stderr, "display: overlay show failed on %s: %s\n",
+                    path_, strerror(errno));
+                reset_fd();
+                return;
+            }
+
+            indicator.display = show.out_display;
+            indicator.visible = true;
+        } else {
+            if (!indicator.visible) {
+                return;
+            }
+
+            SharpMemoryIoctlOvHide hide{};
+            hide.display = indicator.display;
+            if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
+                fprintf(stderr, "display: overlay hide failed on %s: %s\n",
+                    path_, strerror(errno));
+                reset_fd();
+                return;
+            }
+
+            indicator.display = nullptr;
+            indicator.visible = false;
+        }
+
+        redraw();
+    }
+
 private:
+    struct SharpOverlay {
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+        const unsigned char* pixels = nullptr;
+    };
+
+    union SharpMemoryIoctlOvAdd {
+        SharpOverlay* in_overlay;
+        void* out_storage;
+    };
+
+    struct SharpMemoryIoctlOvRem {
+        void* storage = nullptr;
+    };
+
+    union SharpMemoryIoctlOvShow {
+        void* in_storage;
+        void* out_display;
+    };
+
+    struct SharpMemoryIoctlOvHide {
+        void* display = nullptr;
+    };
+
+    struct IndicatorOverlay {
+        void* storage = nullptr;
+        void* display = nullptr;
+        bool visible = false;
+    };
+
     bool ensure_open() {
         if (fd_ >= 0) {
             return true;
@@ -276,12 +455,108 @@ private:
         return true;
     }
 
+    void reset_fd() {
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    static std::array<uint8_t, kIndicatorPixels> render_indicator_pixels(uint32_t indicator_idx) {
+        std::array<uint8_t, kIndicatorPixels> pixels{};
+        for (int y = 0; y < kIndicatorHeight; ++y) {
+            const char* row = kIndicatorRows[indicator_idx][y];
+            for (int x = 0; x < kIndicatorWidth; ++x) {
+                pixels[(y * kIndicatorWidth) + x] = (row[x] == '#') ? 0xff : 0x00;
+            }
+        }
+        return pixels;
+    }
+
+    bool ensure_indicator_storage(uint32_t indicator_idx, IndicatorOverlay& indicator) {
+        if (indicator.storage) {
+            return true;
+        }
+
+        auto pixels = render_indicator_pixels(indicator_idx);
+        SharpOverlay overlay{
+            .x = -static_cast<int>((indicator_idx + 1) * kIndicatorWidth),
+            .y = 0,
+            .width = kIndicatorWidth,
+            .height = kIndicatorHeight,
+            .pixels = pixels.data(),
+        };
+        SharpMemoryIoctlOvAdd add{};
+        add.in_overlay = &overlay;
+
+        if (ioctl(fd_, kDrmIoctlSharpOvAdd, &add) < 0) {
+            fprintf(stderr, "display: overlay add failed on %s: %s\n",
+                path_, strerror(errno));
+            reset_fd();
+            return false;
+        }
+
+        indicator.storage = add.out_storage;
+        return true;
+    }
+
+    void clear_indicators() {
+        if (fd_ < 0) {
+            return;
+        }
+
+        bool needs_redraw = false;
+        for (auto& indicator : indicators_) {
+            if (indicator.visible) {
+                SharpMemoryIoctlOvHide hide{};
+                hide.display = indicator.display;
+                if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
+                    fprintf(stderr, "display: overlay hide during cleanup failed: %s\n",
+                        strerror(errno));
+                }
+                indicator.display = nullptr;
+                indicator.visible = false;
+                needs_redraw = true;
+            }
+
+            if (indicator.storage) {
+                SharpMemoryIoctlOvRem rem{};
+                rem.storage = indicator.storage;
+                if (ioctl(fd_, kDrmIoctlSharpOvRem, &rem) < 0) {
+                    fprintf(stderr, "display: overlay remove during cleanup failed: %s\n",
+                        strerror(errno));
+                }
+                indicator.storage = nullptr;
+            }
+        }
+
+        if (needs_redraw) {
+            if (ioctl(fd_, kDrmIoctlSharpRedraw, 0) < 0) {
+                fprintf(stderr, "display: redraw during cleanup failed: %s\n", strerror(errno));
+            }
+        }
+    }
+
     static constexpr unsigned int kDrmSharpRedraw = 0x00;
+    static constexpr unsigned int kDrmSharpOvAdd = 0x10;
+    static constexpr unsigned int kDrmSharpOvRem = 0x11;
+    static constexpr unsigned int kDrmSharpOvShow = 0x12;
+    static constexpr unsigned int kDrmSharpOvHide = 0x13;
+
     static constexpr unsigned long kDrmIoctlSharpRedraw =
         DRM_IO(DRM_COMMAND_BASE + kDrmSharpRedraw);
+    static constexpr unsigned long kDrmIoctlSharpOvAdd =
+        DRM_IOWR(DRM_COMMAND_BASE + kDrmSharpOvAdd, SharpMemoryIoctlOvAdd);
+    static constexpr unsigned long kDrmIoctlSharpOvRem =
+        DRM_IOW(DRM_COMMAND_BASE + kDrmSharpOvRem, SharpMemoryIoctlOvRem);
+    static constexpr unsigned long kDrmIoctlSharpOvShow =
+        DRM_IOWR(DRM_COMMAND_BASE + kDrmSharpOvShow, SharpMemoryIoctlOvShow);
+    static constexpr unsigned long kDrmIoctlSharpOvHide =
+        DRM_IOW(DRM_COMMAND_BASE + kDrmSharpOvHide, SharpMemoryIoctlOvHide);
 
     const char* path_;
     int fd_ = -1;
+    std::array<IndicatorOverlay, kMaxIndicators> indicators_{};
 };
 
 struct CustomKeymapEntry {
@@ -584,6 +859,13 @@ private:
     }
 
     bool apply_keymap_file(const std::filesystem::path& path) const {
+        // Force the VT into K_UNICODE so the U+XXXX rows we just loaded emit
+        // UTF-8 bytes instead of getting silently downgraded to spaces. The
+        // vt.default_utf8=1 sysctl only covers freshly-allocated consoles.
+        if (!run_command({"kbd_mode", "-u", "-C", kConsoleDevice})) {
+            fprintf(stderr, "keymap: kbd_mode -u %s failed (continuing)\n",
+                kConsoleDevice);
+        }
         fprintf(stderr, "keymap: applying %s to %s\n", path.c_str(), kConsoleDevice);
         return run_command({
             "loadkeys",
@@ -916,6 +1198,14 @@ int main(int argc, char** argv) {
             case k230_NrfToK230_redraw_display_tag:
                 display.redraw();
                 break;
+
+            case k230_NrfToK230_sticky_key_indicator_tag: {
+                const auto& indicator = msg.msg.sticky_key_indicator;
+                fprintf(stderr, "StickyKeyIndicator idx=%u visible=%u\n",
+                    indicator.indicator_idx, indicator.visible);
+                display.set_indicator(indicator.indicator_idx, indicator.visible);
+                break;
+            }
 
             default:
                 fprintf(stderr, "K230: unknown msg tag=%u\n",

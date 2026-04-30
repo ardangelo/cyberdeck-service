@@ -10,6 +10,7 @@ message NrfToK230 {
     RawTouchpadEvent touchpad = 2;
     RedrawDisplay redraw_display = 3;
     FormattedKeypress formatted_keypress = 4;
+    StickyKeyIndicator sticky_key_indicator = 5;
   }
 }
 
@@ -39,6 +40,11 @@ message RawTouchpadEvent {
 }
 
 message RedrawDisplay {}
+
+message StickyKeyIndicator {
+  required uint32 indicator_idx = 1;
+  required bool visible = 2;
+}
 
 // K230 - nRF messages
 message K230ToNrf {
