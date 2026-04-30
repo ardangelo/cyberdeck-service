@@ -29,10 +29,13 @@ fake_uinput: src/fake_uinput.cpp
 src/jni/uart_jni_bridge.o: src/jni/uart_jni_bridge.cpp src/jni/uart_jni_bridge.hpp
 	$(CXX) $(CPPFLAGS) $(JNI_CPPFLAGS) $(JNI_CXXFLAGS) -fPIC -c -o $@ $<
 
-src/main.o: src/main.cpp src/jni/uart_jni_bridge.hpp src/pebble/k230_protocol.pb.h
+src/symbol_overlay.o: src/symbol_overlay.cpp src/symbol_overlay.hpp
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+src/main.o: src/main.cpp src/jni/uart_jni_bridge.hpp src/pebble/k230_protocol.pb.h src/symbol_overlay.hpp
 	$(CXX) $(CPPFLAGS) $(JNI_CPPFLAGS) $(JNI_CXXFLAGS) -c -o $@ $<
 
-cyberdeck_daemon: src/main.o src/jni/uart_jni_bridge.o $(PROTO_OBJS)
+cyberdeck_daemon: src/main.o src/symbol_overlay.o src/jni/uart_jni_bridge.o $(PROTO_OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(JNI_LDFLAGS)
 
 src/jni_test_main.o: src/jni_test_main.cpp src/jni/uart_jni_bridge.hpp

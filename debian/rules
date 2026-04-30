@@ -2,6 +2,8 @@
 
 include /usr/share/dpkg/architecture.mk
 
+OVERLAY_FONT ?= /store/git/beepy-symbol-overlay/font.psf
+
 ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
 export CXX := $(DEB_HOST_GNU_TYPE)-g++
 export CC  := $(DEB_HOST_GNU_TYPE)-gcc
@@ -26,3 +28,6 @@ override_dh_auto_install:
 	install -d debian/cyberdeck-service/usr/lib/cyberdeck-service
 	install -m 644 mobileapp/libpebble3/build/libs/libpebble3-jvm-fat.jar \
 		debian/cyberdeck-service/usr/lib/cyberdeck-service/
+	install -d debian/cyberdeck-service/usr/share/cyberdeck-service
+	install -m 644 $(OVERLAY_FONT) \
+		debian/cyberdeck-service/usr/share/cyberdeck-service/overlay-font.psf
