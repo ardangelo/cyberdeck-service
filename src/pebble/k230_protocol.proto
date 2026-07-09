@@ -11,6 +11,12 @@ message NrfToK230 {
     RedrawDisplay redraw_display = 3;
     FormattedKeypress formatted_keypress = 4;
     StickyKeyIndicator sticky_key_indicator = 5;
+    OverlayBegin overlay_begin = 6;
+    OverlayChunk overlay_chunk = 7;
+    OverlayShow overlay_show = 8;
+    OverlayClear overlay_clear = 9;
+    OverlayRemove overlay_remove = 10;
+    OverlayClearAll overlay_clear_all = 11;
   }
 }
 
@@ -45,6 +51,43 @@ message StickyKeyIndicator {
   required uint32 indicator_idx = 1;
   required bool visible = 2;
 }
+
+enum OverlayPixelFormat {
+  OVERLAY_PIXEL_FORMAT_U8 = 0;
+  OVERLAY_PIXEL_FORMAT_1BPP = 1;
+}
+
+message OverlayBegin {
+  required uint32 handle = 1;
+  required int32 x = 2;
+  required int32 y = 3;
+  required uint32 width = 4;
+  required uint32 height = 5;
+  required uint32 total_bytes = 6;
+  optional OverlayPixelFormat pixel_format = 7 [default = OVERLAY_PIXEL_FORMAT_U8];
+}
+
+message OverlayChunk {
+  required uint32 handle = 1;
+  // Offset is in unpacked overlay pixels, even when pixels is 1bpp packed.
+  required uint32 offset = 2;
+  required bytes pixels = 3;
+  optional uint32 pixel_count = 4;
+}
+
+message OverlayShow {
+  required uint32 handle = 1;
+}
+
+message OverlayClear {
+  required uint32 handle = 1;
+}
+
+message OverlayRemove {
+  required uint32 handle = 1;
+}
+
+message OverlayClearAll {}
 
 // K230 - nRF messages
 message K230ToNrf {

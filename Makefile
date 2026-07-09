@@ -29,13 +29,11 @@ fake_uinput: src/fake_uinput.cpp
 src/jni/uart_jni_bridge.o: src/jni/uart_jni_bridge.cpp src/jni/uart_jni_bridge.hpp
 	$(CXX) $(CPPFLAGS) $(JNI_CPPFLAGS) $(JNI_CXXFLAGS) -fPIC -c -o $@ $<
 
-src/symbol_overlay.o: src/symbol_overlay.cpp src/symbol_overlay.hpp
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
 
-src/main.o: src/main.cpp src/jni/uart_jni_bridge.hpp src/pebble/k230_protocol.pb.h src/symbol_overlay.hpp
+src/main.o: src/main.cpp src/jni/uart_jni_bridge.hpp src/pebble/k230_protocol.pb.h
 	$(CXX) $(CPPFLAGS) $(JNI_CPPFLAGS) $(JNI_CXXFLAGS) -c -o $@ $<
 
-cyberdeck_daemon: src/main.o src/symbol_overlay.o src/jni/uart_jni_bridge.o $(PROTO_OBJS)
+cyberdeck_daemon: src/main.o src/jni/uart_jni_bridge.o $(PROTO_OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(JNI_LDFLAGS)
 
 src/jni_test_main.o: src/jni_test_main.cpp src/jni/uart_jni_bridge.hpp
@@ -45,7 +43,7 @@ jni_test_daemon: src/jni_test_main.o src/jni/uart_jni_bridge.o
 	$(CXX) $(LDFLAGS) -o $@ $^ $(JNI_LDFLAGS)
 
 # Generate nanopb files from proto
-src/pebble/k230_protocol.pb.h src/pebble/k230_protocol.pb.c: src/pebble/k230_protocol.proto
+src/pebble/k230_protocol.pb.h src/pebble/k230_protocol.pb.c: src/pebble/k230_protocol.proto src/pebble/k230_protocol.options
 	python3 src/nanopb/generator/nanopb_generator.py -I src/pebble -D src/pebble src/pebble/k230_protocol.proto
 
 # Compile nanopb C sources

@@ -6,7 +6,9 @@ Build-Depends:
  debhelper-compat (= 13),
  g++-riscv64-linux-gnu [!riscv64],
  default-jdk-headless:native,
- python3:any
+ protobuf-compiler,
+ python3:any,
+ python3-protobuf:native
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 

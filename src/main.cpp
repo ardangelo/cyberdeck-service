@@ -1,5 +1,4 @@
 #include "jni/uart_jni_bridge.hpp"
-#include "symbol_overlay.hpp"
 
 extern "C" {
 #include "nanopb/pb_decode.h"
@@ -21,6 +20,7 @@ extern "C" {
 #include <getopt.h>
 #include <iomanip>
 #include <optional>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -59,108 +59,17 @@ static constexpr uint16_t K230_ENDPOINT = 0xCD00;
 static constexpr uint16_t K230_RESERVED_KEYCODE_BASE = 200;
 static constexpr const char *kGeneratedKeymapFile = "cyberdeck.kmap";
 static constexpr const char *kConsoleDevice = "/dev/tty1";
-static constexpr const char *kDefaultOverlayFontPath =
-    "/usr/share/cyberdeck-service/overlay-font.psf";
-static constexpr uint32_t kSymIndicatorIndex = 4;
-static constexpr int kIndicatorWidth = 14;
-static constexpr int kIndicatorHeight = 14;
-static constexpr size_t kIndicatorPixels = kIndicatorWidth * kIndicatorHeight;
-static constexpr size_t kMaxIndicators = 5;
-
-static constexpr const char* kIndicatorRows[kMaxIndicators][kIndicatorHeight] = {
-    {
-        "..............",
-        ".############.",
-        ".#####..#####.",
-        ".####....####.",
-        ".###......###.",
-        ".##........##.",
-        ".#..........#.",
-        ".####....####.",
-        ".####....####.",
-        ".####....####.",
-        ".####....####.",
-        ".####....####.",
-        ".############.",
-        "..............",
-    },
-    {
-        "..............",
-        ".############.",
-        ".############.",
-        ".###.......##.",
-        ".##.........#.",
-        ".########...#.",
-        ".###........#.",
-        ".#..........#.",
-        ".#...####...#.",
-        ".##...##....#.",
-        ".###....#...#.",
-        ".############.",
-        ".############.",
-        "..............",
-    },
-    {
-        "..............",
-        ".############.",
-        ".############.",
-        ".############.",
-        ".#####..#####.",
-        ".####....####.",
-        ".###......###.",
-        ".##...##...##.",
-        ".#...####...#.",
-        ".#..######..#.",
-        ".############.",
-        ".############.",
-        ".############.",
-        "..............",
-    },
-    {
-        "..............",
-        ".############.",
-        ".############.",
-        ".#...##.....#.",
-        ".#...##.....#.",
-        ".##...#######.",
-        ".###...######.",
-        ".####...#####.",
-        ".#####...####.",
-        ".######.....#.",
-        ".#######....#.",
-        ".############.",
-        ".############.",
-        "..............",
-    },
-    {
-        "..............",
-        ".############.",
-        ".###......###.",
-        ".##........##.",
-        ".#...####...#.",
-        ".#....#######.",
-        ".###.....####.",
-        ".####.....###.",
-        ".######.....#.",
-        ".#...####...#.",
-        ".##........##.",
-        ".###......###.",
-        ".############.",
-        "..............",
-    },
-};
 
 struct Opts {
     const char* uart_path = nullptr;
     const char* uinput_path = nullptr;
     const char* jar_path = "/tmp/libpebble3-jvm-fat.jar";
     const char* display_path = nullptr;
-    const char* overlay_font_path = nullptr;
     bool test_mode = false;
 };
 
 static void print_usage(const char* argv0) {
-    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--jar=<path>] [--display=<path>] [--overlay-font=<path>] [--test]\n",
+    fprintf(stderr, "Usage: %s --uart=<path> --uinput=<path> [--jar=<path>] [--display=<path>] [--test]\n",
         argv0);
 }
 
@@ -172,14 +81,13 @@ static Opts parse_argv(int argc, char** argv) {
         {"uinput",  required_argument, nullptr, 'i'},
         {"jar",     required_argument, nullptr, 'j'},
         {"display", required_argument, nullptr, 'd'},
-        {"overlay-font", required_argument, nullptr, 'f'},
         {"test",    no_argument,       nullptr, 't'},
         {"help",    no_argument,       nullptr, 'h'},
         {nullptr,   0,                 nullptr, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "u:i:j:d:f:th", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "u:i:j:d:th", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'u':
                 opts.uart_path = optarg;
@@ -192,9 +100,6 @@ static Opts parse_argv(int argc, char** argv) {
                 break;
             case 'd':
                 opts.display_path = optarg;
-                break;
-            case 'f':
-                opts.overlay_font_path = optarg;
                 break;
             case 't':
                 opts.test_mode = true;
@@ -211,10 +116,6 @@ static Opts parse_argv(int argc, char** argv) {
     if (!opts.uart_path || !opts.uinput_path) {
         print_usage(argv[0]);
         exit(1);
-    }
-
-    if (opts.display_path && !opts.overlay_font_path) {
-        opts.overlay_font_path = kDefaultOverlayFontPath;
     }
 
     return opts;
@@ -343,8 +244,7 @@ public:
     explicit DisplayDevice(const char* path) : path_(path) {}
 
     ~DisplayDevice() {
-        clear_symbol_overlay();
-        clear_indicators();
+        clear_all_overlays();
         if (fd_ >= 0) {
             close(fd_);
         }
@@ -371,114 +271,156 @@ public:
         fprintf(stderr, "display: redraw ioctl sent on %s\n", path_);
     }
 
-    void set_indicator(uint32_t indicator_idx, bool visible) {
+    void begin_overlay_upload(uint32_t handle, int x, int y, uint32_t width,
+                              uint32_t height, uint32_t total_bytes,
+                              k230_OverlayPixelFormat pixel_format) {
         if (!path_) {
             return;
         }
-        if (indicator_idx >= indicators_.size()) {
-            fprintf(stderr, "display: invalid sticky indicator index %u\n", indicator_idx);
+        if (handle == 0 || width == 0 || height == 0 ||
+            total_bytes == 0 || total_bytes != (width * height)) {
+            fprintf(stderr,
+                "display: invalid overlay begin handle=%u x=%d y=%d width=%u height=%u bytes=%u\n",
+                handle, x, y, width, height, total_bytes);
             return;
         }
-        if (!ensure_open()) {
-            return;
-        }
 
-        auto& indicator = indicators_[indicator_idx];
-        if (visible) {
-            if (!ensure_indicator_storage(indicator_idx, indicator)) {
-                return;
-            }
-            if (indicator.visible) {
-                return;
-            }
+        remove_overlay(handle, RedrawMode::Defer);
 
-            SharpMemoryIoctlOvShow show{};
-            show.in_storage = indicator.storage;
-            if (ioctl(fd_, kDrmIoctlSharpOvShow, &show) < 0) {
-                fprintf(stderr, "display: overlay show failed on %s: %s\n",
-                    path_, strerror(errno));
-                reset_fd();
-                return;
-            }
-
-            indicator.display = show.out_display;
-            indicator.visible = true;
-        } else {
-            if (!indicator.visible) {
-                return;
-            }
-
-            SharpMemoryIoctlOvHide hide{};
-            hide.display = indicator.display;
-            if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
-                fprintf(stderr, "display: overlay hide failed on %s: %s\n",
-                    path_, strerror(errno));
-                reset_fd();
-                return;
-            }
-
-            indicator.display = nullptr;
-            indicator.visible = false;
-        }
-
-        redraw();
+        PendingOverlayUpload upload;
+        upload.x = x;
+        upload.y = y;
+        upload.width = static_cast<int>(width);
+        upload.height = static_cast<int>(height);
+        upload.pixel_format = pixel_format;
+        upload.pixels.resize(total_bytes);
+        upload.received.resize(total_bytes, 0);
+        pending_uploads_[handle] = std::move(upload);
+        fprintf(stderr,
+            "display: overlay begin handle=%u x=%d y=%d width=%u height=%u bytes=%u format=%u\n",
+            handle, x, y, width, height, total_bytes, static_cast<unsigned>(pixel_format));
     }
 
-    void show_symbol_overlay(const SymbolOverlayImage& image) {
+    void write_overlay_chunk(uint32_t handle, uint32_t offset, const uint8_t* pixels,
+                             size_t length, uint32_t pixel_count) {
         if (!path_) {
             return;
         }
-        if (image.width <= 0 || image.height <= 0 || image.pixels.empty()) {
-            fprintf(stderr, "display: invalid symbol overlay image\n");
+
+        auto pending_it = pending_uploads_.find(handle);
+        if (pending_it == pending_uploads_.end()) {
+            fprintf(stderr, "display: overlay chunk for unknown handle=%u\n", handle);
+            return;
+        }
+
+        auto& upload = pending_it->second;
+        if (upload.pixel_format == k230_OverlayPixelFormat_OVERLAY_PIXEL_FORMAT_1BPP) {
+            write_overlay_chunk_1bpp(handle, upload, offset, pixels, length, pixel_count);
+            return;
+        }
+
+        if (pixel_count == 0) {
+            pixel_count = static_cast<uint32_t>(length);
+        }
+        if (length == 0 || pixel_count != length || offset > upload.pixels.size() ||
+            length > (upload.pixels.size() - offset)) {
+            fprintf(stderr,
+                "display: invalid overlay chunk handle=%u offset=%u length=%zu pixels=%u total=%zu\n",
+                handle, offset, length, pixel_count, upload.pixels.size());
+            return;
+        }
+
+        memcpy(upload.pixels.data() + offset, pixels, length);
+        for (size_t i = 0; i < length; ++i) {
+            const size_t idx = offset + i;
+            if (!upload.received[idx]) {
+                upload.received[idx] = 1;
+                ++upload.received_bytes;
+            }
+        }
+
+        if (upload.received_bytes != upload.pixels.size()) {
+            return;
+        }
+
+        if (install_overlay(handle, upload)) {
+            fprintf(stderr, "display: overlay upload complete handle=%u\n", handle);
+            pending_uploads_.erase(pending_it);
+        }
+    }
+
+    void show_overlay(uint32_t handle) {
+        if (!path_) {
+            return;
+        }
+        auto it = overlays_.find(handle);
+        if (it == overlays_.end()) {
+            fprintf(stderr, "display: show unknown overlay handle=%u\n", handle);
+            return;
+        }
+        if (it->second.visible) {
             return;
         }
         if (!ensure_open()) {
-            return;
-        }
-        if (!ensure_symbol_storage(image)) {
-            return;
-        }
-        if (symbol_overlay_.visible) {
             return;
         }
 
         SharpMemoryIoctlOvShow show{};
-        show.in_storage = symbol_overlay_.storage;
+        show.in_storage = it->second.storage;
         if (ioctl(fd_, kDrmIoctlSharpOvShow, &show) < 0) {
-            fprintf(stderr, "display: symbol overlay show failed on %s: %s\n",
-                path_, strerror(errno));
+            fprintf(stderr, "display: overlay show failed on %s handle=%u: %s\n",
+                path_, handle, strerror(errno));
             reset_fd();
             return;
         }
 
-        symbol_overlay_.display = show.out_display;
-        symbol_overlay_.visible = true;
+        it->second.display = show.out_display;
+        it->second.visible = true;
         redraw();
     }
 
-    void hide_symbol_overlay() {
-        if (!path_ || !symbol_overlay_.visible) {
+    void clear_overlay(uint32_t handle) {
+        auto it = overlays_.find(handle);
+        if (it == overlays_.end()) {
             return;
         }
-        if (!ensure_open()) {
+        if (hide_overlay(handle, it->second)) {
+            redraw();
+        }
+    }
+
+    void remove_overlay(uint32_t handle) {
+        remove_overlay(handle, RedrawMode::Immediate);
+    }
+
+    void clear_all_overlays() {
+        if (fd_ < 0) {
+            overlays_.clear();
+            pending_uploads_.clear();
             return;
         }
 
-        SharpMemoryIoctlOvHide hide{};
-        hide.display = symbol_overlay_.display;
-        if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
-            fprintf(stderr, "display: symbol overlay hide failed on %s: %s\n",
-                path_, strerror(errno));
-            reset_fd();
-            return;
+        bool needs_redraw = false;
+        for (auto& [handle, overlay] : overlays_) {
+            needs_redraw = hide_overlay(handle, overlay) || needs_redraw;
+            SharpMemoryIoctlOvRem rem{};
+            rem.storage = overlay.storage;
+            if (ioctl(fd_, kDrmIoctlSharpOvRem, &rem) < 0) {
+                fprintf(stderr, "display: overlay remove during cleanup failed handle=%u: %s\n",
+                    handle, strerror(errno));
+            }
         }
 
-        symbol_overlay_.display = nullptr;
-        symbol_overlay_.visible = false;
-        redraw();
+        overlays_.clear();
+        pending_uploads_.clear();
+        if (needs_redraw) {
+            redraw();
+        }
     }
 
 private:
+    enum class RedrawMode { Immediate, Defer };
+
     struct SharpOverlay {
         int x = 0;
         int y = 0;
@@ -505,10 +447,25 @@ private:
         void* display = nullptr;
     };
 
-    struct IndicatorOverlay {
+    struct OverlayState {
         void* storage = nullptr;
         void* display = nullptr;
         bool visible = false;
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+    };
+
+    struct PendingOverlayUpload {
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+        std::vector<uint8_t> pixels;
+        k230_OverlayPixelFormat pixel_format = k230_OverlayPixelFormat_OVERLAY_PIXEL_FORMAT_U8;
+        std::vector<uint8_t> received;
+        size_t received_bytes = 0;
     };
 
     bool ensure_open() {
@@ -531,140 +488,126 @@ private:
         }
     }
 
-    static std::array<uint8_t, kIndicatorPixels> render_indicator_pixels(uint32_t indicator_idx) {
-        std::array<uint8_t, kIndicatorPixels> pixels{};
-        for (int y = 0; y < kIndicatorHeight; ++y) {
-            const char* row = kIndicatorRows[indicator_idx][y];
-            for (int x = 0; x < kIndicatorWidth; ++x) {
-                pixels[(y * kIndicatorWidth) + x] = (row[x] == '#') ? 0xff : 0x00;
+    void write_overlay_chunk_1bpp(uint32_t handle, PendingOverlayUpload& upload,
+                                  uint32_t offset, const uint8_t* packed,
+                                  size_t length, uint32_t pixel_count) {
+        if (pixel_count == 0) {
+            pixel_count = static_cast<uint32_t>(length * 8);
+            if (offset <= upload.pixels.size() &&
+                pixel_count > (upload.pixels.size() - offset)) {
+                pixel_count = static_cast<uint32_t>(upload.pixels.size() - offset);
             }
         }
-        return pixels;
-    }
-
-    bool ensure_indicator_storage(uint32_t indicator_idx, IndicatorOverlay& indicator) {
-        if (indicator.storage) {
-            return true;
+        const size_t required_length = (pixel_count + 7) / 8;
+        if (length < required_length || offset > upload.pixels.size() ||
+            pixel_count > (upload.pixels.size() - offset)) {
+            fprintf(stderr,
+                "display: invalid 1bpp overlay chunk handle=%u offset=%u length=%zu pixels=%u total=%zu\n",
+                handle, offset, length, pixel_count, upload.pixels.size());
+            return;
         }
 
-        auto pixels = render_indicator_pixels(indicator_idx);
+        for (uint32_t i = 0; i < pixel_count; ++i) {
+            const size_t idx = offset + i;
+            upload.pixels[idx] = (packed[i / 8] & (0x80 >> (i % 8))) ? 0xff : 0x00;
+            if (!upload.received[idx]) {
+                upload.received[idx] = 1;
+                ++upload.received_bytes;
+            }
+        }
+
+        if (upload.received_bytes != upload.pixels.size()) {
+            return;
+        }
+
+        PendingOverlayUpload completed = std::move(upload);
+        auto pending_it = pending_uploads_.find(handle);
+        if (pending_it != pending_uploads_.end()) {
+            pending_uploads_.erase(pending_it);
+        }
+        if (install_overlay(handle, completed)) {
+            fprintf(stderr, "display: overlay upload complete handle=%u\n", handle);
+        }
+    }
+
+    bool install_overlay(uint32_t handle, const PendingOverlayUpload& upload) {
+        if (!ensure_open()) {
+            return false;
+        }
+
         SharpOverlay overlay{
-            .x = -static_cast<int>((indicator_idx + 1) * kIndicatorWidth),
-            .y = 0,
-            .width = kIndicatorWidth,
-            .height = kIndicatorHeight,
-            .pixels = pixels.data(),
+            .x = upload.x,
+            .y = upload.y,
+            .width = upload.width,
+            .height = upload.height,
+            .pixels = upload.pixels.data(),
         };
         SharpMemoryIoctlOvAdd add{};
         add.in_overlay = &overlay;
 
         if (ioctl(fd_, kDrmIoctlSharpOvAdd, &add) < 0) {
-            fprintf(stderr, "display: overlay add failed on %s: %s\n",
-                path_, strerror(errno));
+            fprintf(stderr, "display: overlay add failed on %s handle=%u: %s\n",
+                path_, handle, strerror(errno));
             reset_fd();
             return false;
         }
 
-        indicator.storage = add.out_storage;
-        return true;
-    }
-
-    bool ensure_symbol_storage(const SymbolOverlayImage& image) {
-        if (symbol_overlay_.storage) {
-            return true;
-        }
-
-        SharpOverlay overlay{
-            .x = 0,
-            .y = -image.height,
-            .width = image.width,
-            .height = image.height,
-            .pixels = image.pixels.data(),
+        overlays_[handle] = OverlayState{
+            .storage = add.out_storage,
+            .display = nullptr,
+            .visible = false,
+            .x = upload.x,
+            .y = upload.y,
+            .width = upload.width,
+            .height = upload.height,
         };
-        SharpMemoryIoctlOvAdd add{};
-        add.in_overlay = &overlay;
+        return true;
+    }
 
-        if (ioctl(fd_, kDrmIoctlSharpOvAdd, &add) < 0) {
-            fprintf(stderr, "display: symbol overlay add failed on %s: %s\n",
-                path_, strerror(errno));
+    bool hide_overlay(uint32_t handle, OverlayState& overlay) {
+        if (!overlay.visible) {
+            return false;
+        }
+        if (!ensure_open()) {
+            return false;
+        }
+
+        SharpMemoryIoctlOvHide hide{};
+        hide.display = overlay.display;
+        if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
+            fprintf(stderr, "display: overlay hide failed on %s handle=%u: %s\n",
+                path_, handle, strerror(errno));
             reset_fd();
             return false;
         }
 
-        symbol_overlay_.storage = add.out_storage;
+        overlay.display = nullptr;
+        overlay.visible = false;
         return true;
     }
 
-    void clear_symbol_overlay() {
-        if (fd_ < 0) {
+    void remove_overlay(uint32_t handle, RedrawMode redraw_mode) {
+        auto it = overlays_.find(handle);
+        pending_uploads_.erase(handle);
+        if (it == overlays_.end()) {
+            return;
+        }
+        if (!ensure_open()) {
+            overlays_.erase(it);
             return;
         }
 
-        bool needs_redraw = false;
-        if (symbol_overlay_.visible) {
-            SharpMemoryIoctlOvHide hide{};
-            hide.display = symbol_overlay_.display;
-            if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
-                fprintf(stderr, "display: symbol overlay hide during cleanup failed: %s\n",
-                    strerror(errno));
-            }
-            symbol_overlay_.display = nullptr;
-            symbol_overlay_.visible = false;
-            needs_redraw = true;
+        const bool needs_redraw = hide_overlay(handle, it->second);
+        SharpMemoryIoctlOvRem rem{};
+        rem.storage = it->second.storage;
+        if (ioctl(fd_, kDrmIoctlSharpOvRem, &rem) < 0) {
+            fprintf(stderr, "display: overlay remove failed on %s handle=%u: %s\n",
+                path_, handle, strerror(errno));
+            reset_fd();
         }
-
-        if (symbol_overlay_.storage) {
-            SharpMemoryIoctlOvRem rem{};
-            rem.storage = symbol_overlay_.storage;
-            if (ioctl(fd_, kDrmIoctlSharpOvRem, &rem) < 0) {
-                fprintf(stderr, "display: symbol overlay remove during cleanup failed: %s\n",
-                    strerror(errno));
-            }
-            symbol_overlay_.storage = nullptr;
-        }
-
-        if (needs_redraw) {
-            if (ioctl(fd_, kDrmIoctlSharpRedraw, 0) < 0) {
-                fprintf(stderr, "display: redraw during symbol cleanup failed: %s\n",
-                    strerror(errno));
-            }
-        }
-    }
-
-    void clear_indicators() {
-        if (fd_ < 0) {
-            return;
-        }
-
-        bool needs_redraw = false;
-        for (auto& indicator : indicators_) {
-            if (indicator.visible) {
-                SharpMemoryIoctlOvHide hide{};
-                hide.display = indicator.display;
-                if (ioctl(fd_, kDrmIoctlSharpOvHide, &hide) < 0) {
-                    fprintf(stderr, "display: overlay hide during cleanup failed: %s\n",
-                        strerror(errno));
-                }
-                indicator.display = nullptr;
-                indicator.visible = false;
-                needs_redraw = true;
-            }
-
-            if (indicator.storage) {
-                SharpMemoryIoctlOvRem rem{};
-                rem.storage = indicator.storage;
-                if (ioctl(fd_, kDrmIoctlSharpOvRem, &rem) < 0) {
-                    fprintf(stderr, "display: overlay remove during cleanup failed: %s\n",
-                        strerror(errno));
-                }
-                indicator.storage = nullptr;
-            }
-        }
-
-        if (needs_redraw) {
-            if (ioctl(fd_, kDrmIoctlSharpRedraw, 0) < 0) {
-                fprintf(stderr, "display: redraw during cleanup failed: %s\n", strerror(errno));
-            }
+        overlays_.erase(it);
+        if (needs_redraw && redraw_mode == RedrawMode::Immediate) {
+            redraw();
         }
     }
 
@@ -687,8 +630,8 @@ private:
 
     const char* path_;
     int fd_ = -1;
-    std::array<IndicatorOverlay, kMaxIndicators> indicators_{};
-    IndicatorOverlay symbol_overlay_{};
+    std::unordered_map<uint32_t, OverlayState> overlays_;
+    std::unordered_map<uint32_t, PendingOverlayUpload> pending_uploads_;
 };
 
 struct CustomKeymapEntry {
@@ -875,35 +818,6 @@ static const std::array<KeymapSeed, 62> kKeymapSeeds = {{
     { KEY_MUTE,      k230_FormattedLayer_FORMATTED_LAYER_SYM, {'$', 0, 0, 0} },
 }};
 
-static std::optional<uint16_t> symbol_overlay_codepoint_from_utf8(
-    const std::array<uint8_t, 4>& utf8) {
-    // Firmware currently carries the Euro sign as c2 82 ac; preserve the
-    // intended overlay glyph instead of dropping that legacy byte sequence.
-    if (utf8 == std::array<uint8_t, 4>{0xc2, 0x82, 0xac, 0}) {
-        return 0x20ac;
-    }
-
-    const auto codepoint = utf8_to_codepoint(utf8);
-    if (!codepoint.has_value() || *codepoint > 0xffff) {
-        return std::nullopt;
-    }
-    return static_cast<uint16_t>(*codepoint);
-}
-
-static SymbolOverlayKeymap build_symbol_overlay_keymap() {
-    SymbolOverlayKeymap keymap;
-    for (const auto& seed : kKeymapSeeds) {
-        if (seed.layer != k230_FormattedLayer_FORMATTED_LAYER_SYM) {
-            continue;
-        }
-        const auto codepoint = symbol_overlay_codepoint_from_utf8(seed.utf8);
-        if (!codepoint.has_value()) {
-            continue;
-        }
-        keymap[static_cast<int>(seed.base_keycode)] = *codepoint;
-    }
-    return keymap;
-}
 
 class ConsoleKeymapManager {
 public:
@@ -1297,24 +1211,13 @@ int main(int argc, char** argv) {
     UInputDevice uinput(opts.uinput_path, ioctl_setup);
     DisplayDevice display(opts.display_path);
     ConsoleKeymapManager keymaps;
-    std::optional<SymbolOverlayImage> symbol_overlay;
-    if (opts.display_path && opts.overlay_font_path) {
-        try {
-            symbol_overlay = render_symbol_overlay(
-                opts.overlay_font_path, build_symbol_overlay_keymap());
-            fprintf(stderr, "display: rendered symbol overlay %dx%d from %s\n",
-                symbol_overlay->width, symbol_overlay->height, opts.overlay_font_path);
-        } catch (const std::exception& ex) {
-            fprintf(stderr, "display: symbol overlay disabled: %s\n", ex.what());
-        }
-    }
 
     fprintf(stderr, "Creating JNI bridge (JAR: %s)...\n", opts.jar_path);
     cyberdeck::UartJniBridge bridge(opts.jar_path);
 
     std::atomic_bool connected{false};
 
-    bridge.set_endpoint_callback([&uinput, &display, &keymaps, &symbol_overlay](
+    bridge.set_endpoint_callback([&uinput, &display, &keymaps](
         uint16_t endpoint, const std::vector<uint8_t>& data) {
         if (endpoint != K230_ENDPOINT) {
             fprintf(stderr, "Ignoring endpoint 0x%04x (%zu bytes)\n", endpoint, data.size());
@@ -1372,24 +1275,42 @@ int main(int argc, char** argv) {
                 display.redraw();
                 break;
 
-            case k230_NrfToK230_sticky_key_indicator_tag: {
-                const auto& indicator = msg.msg.sticky_key_indicator;
-                fprintf(stderr, "StickyKeyIndicator idx=%u visible=%u\n",
-                    indicator.indicator_idx, indicator.visible);
-                display.set_indicator(indicator.indicator_idx, indicator.visible);
-                if (indicator.indicator_idx == kSymIndicatorIndex) {
-                    if (indicator.visible) {
-                        if (symbol_overlay.has_value()) {
-                            display.show_symbol_overlay(*symbol_overlay);
-                        } else {
-                            fprintf(stderr, "display: symbol overlay requested but unavailable\n");
-                        }
-                    } else {
-                        display.hide_symbol_overlay();
-                    }
-                }
+            case k230_NrfToK230_sticky_key_indicator_tag:
+                fprintf(stderr, "StickyKeyIndicator deprecated; ignoring\n");
+                break;
+
+            case k230_NrfToK230_overlay_begin_tag: {
+                const auto& overlay = msg.msg.overlay_begin;
+                const auto format = overlay.has_pixel_format ? overlay.pixel_format :
+                    k230_OverlayPixelFormat_OVERLAY_PIXEL_FORMAT_U8;
+                display.begin_overlay_upload(overlay.handle, overlay.x, overlay.y,
+                    overlay.width, overlay.height, overlay.total_bytes, format);
                 break;
             }
+
+            case k230_NrfToK230_overlay_chunk_tag: {
+                const auto& chunk = msg.msg.overlay_chunk;
+                const uint32_t pixel_count = chunk.has_pixel_count ? chunk.pixel_count : 0;
+                display.write_overlay_chunk(chunk.handle, chunk.offset,
+                    chunk.pixels.bytes, chunk.pixels.size, pixel_count);
+                break;
+            }
+
+            case k230_NrfToK230_overlay_show_tag:
+                display.show_overlay(msg.msg.overlay_show.handle);
+                break;
+
+            case k230_NrfToK230_overlay_clear_tag:
+                display.clear_overlay(msg.msg.overlay_clear.handle);
+                break;
+
+            case k230_NrfToK230_overlay_remove_tag:
+                display.remove_overlay(msg.msg.overlay_remove.handle);
+                break;
+
+            case k230_NrfToK230_overlay_clear_all_tag:
+                display.clear_all_overlays();
+                break;
 
             default:
                 fprintf(stderr, "K230: unknown msg tag=%u\n",
