@@ -6,7 +6,7 @@ Build-Depends:
  debhelper-compat (= 13),
  crossbuild-essential-riscv64:native,
  openjdk-21-jdk-headless:native,
- protobuf-compiler:native,
+ protobuf-compiler,
  python3:any,
  python3-protobuf:native
 Standards-Version: 4.6.2
