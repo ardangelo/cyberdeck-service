@@ -16,8 +16,7 @@ ExecStart=/usr/bin/cyberdeck_daemon \
     --uart=/dev/ttyS2 \
     --uinput=/dev/uinput \
     --jar=/usr/lib/cyberdeck-service/libpebble3-jvm-fat.jar \
-    --display=/dev/dri/card0 \
-    --overlay-font=/usr/share/cyberdeck-service/overlay-font.psf
+    --display=/dev/dri/card0
 Restart=on-failure
 RestartSec=5
 

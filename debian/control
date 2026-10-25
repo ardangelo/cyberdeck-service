@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Andrew D'Angelo <dangeloandrew@outlook.com>
 Build-Depends:
  debhelper-compat (= 13),
- g++-riscv64-linux-gnu [!riscv64],
+ g++-riscv64-linux-gnu,
  default-jdk-headless:native,
  protobuf-compiler,
  python3:any,

@@ -429,9 +429,13 @@ private:
         const unsigned char* pixels = nullptr;
     };
 
-    union SharpMemoryIoctlOvAdd {
-        SharpOverlay* in_overlay;
-        void* out_storage;
+    struct SharpMemoryIoctlOvAdd {
+        int32_t x;
+        int32_t y;
+        int32_t width;
+        int32_t height;
+        uint64_t pixels;
+        uint64_t out_storage;
     };
 
     struct SharpMemoryIoctlOvRem {
@@ -535,15 +539,14 @@ private:
             return false;
         }
 
-        SharpOverlay overlay{
+        SharpMemoryIoctlOvAdd add{
             .x = upload.x,
             .y = upload.y,
             .width = upload.width,
             .height = upload.height,
-            .pixels = upload.pixels.data(),
+            .pixels = reinterpret_cast<uint64_t>(upload.pixels.data()),
+            .out_storage = 0,
         };
-        SharpMemoryIoctlOvAdd add{};
-        add.in_overlay = &overlay;
 
         if (ioctl(fd_, kDrmIoctlSharpOvAdd, &add) < 0) {
             fprintf(stderr, "display: overlay add failed on %s handle=%u: %s\n",
@@ -553,7 +556,7 @@ private:
         }
 
         overlays_[handle] = OverlayState{
-            .storage = add.out_storage,
+            .storage = reinterpret_cast<void *>(add.out_storage),
             .display = nullptr,
             .visible = false,
             .x = upload.x,
