@@ -21,7 +21,7 @@ PROTO_OBJS = $(PROTO_SRCS:.c=.o)
 all: cyberdeck_daemon fake_uinput jni_test_daemon
 
 fatjar:
-	cd mobileapp && ./gradlew :libpebble3:jvmFatJar
+	cd mobileapp && ./gradlew --no-daemon --dependency-verification strict :libpebble3:jvmFatJar
 
 fake_uinput: src/fake_uinput.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
@@ -42,18 +42,19 @@ src/jni_test_main.o: src/jni_test_main.cpp src/jni/uart_jni_bridge.hpp
 jni_test_daemon: src/jni_test_main.o src/jni/uart_jni_bridge.o
 	$(CXX) $(LDFLAGS) -o $@ $^ $(JNI_LDFLAGS)
 
-# Generate nanopb files from proto
-src/pebble/k230_protocol.pb.h src/pebble/k230_protocol.pb.c: src/pebble/k230_protocol.proto src/pebble/k230_protocol.options
+# Generate both nanopb outputs together, including in parallel builds.
+src/pebble/k230_protocol.pb.h src/pebble/k230_protocol.pb.c &: src/pebble/k230_protocol.proto src/pebble/k230_protocol.options
 	python3 src/nanopb/generator/nanopb_generator.py -I src/pebble -D src/pebble src/pebble/k230_protocol.proto
 
 # Compile nanopb C sources
 src/nanopb/%.o: src/nanopb/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+src/pebble/k230_protocol.pb.o: src/pebble/k230_protocol.pb.h
 src/pebble/%.o: src/pebble/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
 	rm -f cyberdeck_daemon fake_uinput jni_test_daemon src/*.o src/jni/*.o \
-		src/nanopb/*.o src/nanopb/*.pb.c src/nanopb/*.pb.h
+		src/nanopb/*.o src/pebble/*.o src/pebble/*.pb.c src/pebble/*.pb.h
 deb:
 	dpkg-buildpackage -us -uc --host-arch riscv64

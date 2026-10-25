@@ -4,19 +4,19 @@ Priority: optional
 Maintainer: Andrew D'Angelo <dangeloandrew@outlook.com>
 Build-Depends:
  debhelper-compat (= 13),
- g++-riscv64-linux-gnu,
- default-jdk-headless:native,
- protobuf-compiler,
+ crossbuild-essential-riscv64:native,
+ openjdk-21-jdk-headless:native,
+ protobuf-compiler:native,
  python3:any,
  python3-protobuf:native
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 
 Package: cyberdeck-service
-Architecture: any
-Depends: ${misc:Depends},
+Architecture: riscv64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
          kbd,
-         libstdc++6,
-         default-jre-headless
+         openjdk-21-jre-headless
 Description: Cyberdeck UART bridge daemon
  Manages nRF5 UART link to Linux

@@ -1,0 +1,4 @@
+tar-ignore = qemu-linux
+tar-ignore = mobileapp/.gradle
+tar-ignore = mobileapp/build
+tar-ignore = mobileapp/*/build

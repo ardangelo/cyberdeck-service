@@ -2,8 +2,6 @@
 
 include /usr/share/dpkg/architecture.mk
 
-OVERLAY_FONT ?= /store/git/beepy-symbol-overlay/font.psf
-
 ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
 export CXX := $(DEB_HOST_GNU_TYPE)-g++
 export CC  := $(DEB_HOST_GNU_TYPE)-gcc
@@ -15,12 +13,13 @@ endif
 override_dh_auto_configure:
 
 override_dh_auto_build:
-	cd mobileapp && ./gradlew :libpebble3:jvmFatJar
-	$(MAKE) cyberdeck_daemon JAVA_HOME=/usr/lib/jvm/default-java
+	cd mobileapp && ./gradlew --no-daemon --dependency-verification strict :libpebble3:jvmFatJar
+	$(MAKE) cyberdeck_daemon JAVA_HOME=$(JAVA_HOME)
 
 override_dh_auto_test:
 
-override_dh_shlibdeps:
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
 
 override_dh_auto_install:
 	install -d debian/cyberdeck-service/usr/bin
@@ -28,6 +27,6 @@ override_dh_auto_install:
 	install -d debian/cyberdeck-service/usr/lib/cyberdeck-service
 	install -m 644 mobileapp/libpebble3/build/libs/libpebble3-jvm-fat.jar \
 		debian/cyberdeck-service/usr/lib/cyberdeck-service/
-	install -d debian/cyberdeck-service/usr/share/cyberdeck-service
-	install -m 644 $(OVERLAY_FONT) \
-		debian/cyberdeck-service/usr/share/cyberdeck-service/overlay-font.psf
+	install -d debian/cyberdeck-service/usr/share/doc/cyberdeck-service/dependency-licenses
+	install -m 644 mobileapp/libpebble3/build/reports/dependency-licenses/* \
+		debian/cyberdeck-service/usr/share/doc/cyberdeck-service/dependency-licenses/
